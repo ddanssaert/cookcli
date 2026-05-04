@@ -1,0 +1,50 @@
+name: Binary release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Linux binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Build CSS
+        run: npm run build-css
+
+      - name: Build JS
+        run: npm run build-js
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build binary
+        run: cargo build --release --no-default-features
+
+      - name: Package
+        run: tar czvf cook-x86_64-linux.tar.gz -C target/release cook
+
+      - name: Upload to latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          prerelease: true
+          files: cook-x86_64-linux.tar.gz
