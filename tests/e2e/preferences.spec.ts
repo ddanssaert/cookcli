@@ -188,6 +188,9 @@ olive_oil = { amount = "1", unit = "l" }
   });
 
   test('should organize preferences into sections', async ({ page }) => {
+    // The page renders each preference group as a .card with its own heading.
+    expect(await page.locator('main .card h2').count()).toBeGreaterThanOrEqual(5);
+
     // Check for organized sections
     const sections = page.locator('section, fieldset, .preference-section');
 
@@ -207,5 +210,77 @@ olive_oil = { amount = "1", unit = "l" }
         }
       }
     }
+  });
+});
+
+test.describe('Feature toggles in preferences', () => {
+  test.beforeEach(async ({ context }) => {
+    await context.addCookies([
+      { name: 'show_shopping_list', value: '1', url: 'http://localhost:9080' },
+      { name: 'show_pantry', value: '1', url: 'http://localhost:9080' },
+    ]);
+  });
+
+  test('displays Features section with two active buttons', async ({ page }) => {
+    await page.goto('/preferences');
+    await page.waitForLoadState('networkidle');
+
+    const shoppingBtn = page.getByRole('button', { name: /Shopping/i });
+    const pantryBtn = page.getByRole('button', { name: /Pantry/i });
+
+    await expect(shoppingBtn).toBeVisible();
+    await expect(pantryBtn).toBeVisible();
+
+    // Both enabled → toggles report pressed state via aria-pressed
+    await expect(shoppingBtn).toHaveAttribute('aria-pressed', 'true');
+    await expect(pantryBtn).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('toggling Shopping List off removes it from nav', async ({ page }) => {
+    await page.goto('/preferences');
+    await page.waitForLoadState('networkidle');
+
+    await page.getByRole('button', { name: /Shopping/i }).click();
+    await page.waitForLoadState('networkidle');
+
+    // Button is now not pressed
+    const shoppingBtn = page.getByRole('button', { name: /Shopping/i });
+    await expect(shoppingBtn).toHaveAttribute('aria-pressed', 'false');
+
+    // Nav no longer shows Shopping List
+    await expect(page.locator('nav a.nav-pill', { hasText: /Shopping/i })).not.toBeVisible();
+  });
+
+  test('toggling a feature back on restores the nav link', async ({ context, page }) => {
+    await context.addCookies([
+      { name: 'show_shopping_list', value: '0', url: 'http://localhost:9080' },
+    ]);
+    await page.goto('/preferences');
+    await page.waitForLoadState('networkidle');
+
+    // Shopping is currently off — click to enable
+    await page.getByRole('button', { name: /Shopping/i }).click();
+    await page.waitForLoadState('networkidle');
+
+    await expect(page.locator('nav a.nav-pill', { hasText: /Shopping/i })).toBeVisible();
+  });
+});
+
+test.describe('Language picker', () => {
+  test('wins over a lang cookie set by another app on the same host', async ({ context, page }) => {
+    // Cookies ignore the port: an app elsewhere on this host can own `lang`,
+    // and as HttpOnly the page cannot even overwrite it (#799).
+    await context.addCookies([
+      { name: 'lang', value: 'en-US', url: 'http://localhost:9080', httpOnly: true },
+    ]);
+    await page.goto('/preferences');
+
+    await Promise.all([
+      page.waitForEvent('load'),
+      page.getByRole('button', { name: /Français/ }).click(),
+    ]);
+
+    await expect(page.locator('html')).toHaveAttribute('lang', 'fr-FR');
+    await expect(page.getByRole('button', { name: /Français/ })).toHaveAttribute('aria-pressed', 'true');
   });
 });

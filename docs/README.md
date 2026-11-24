@@ -14,9 +14,17 @@ CookCLI is a free, open-source command-line tool for working with [Cooklang](htt
 | [report](report.md) | `rp` | Generate custom reports using templates |
 | [doctor](doctor.md) | | Analyze recipes for issues |
 | [pantry](pantry.md) | `p` | Manage and analyze pantry inventory |
+| [build](build.md) | | Build a static website from your recipes |
 | [seed](seed.md) | | Initialize with example recipes |
 | [lsp](lsp.md) | | Start the Language Server Protocol server |
 | [update](update.md) | `u` | Update CookCLI to the latest version |
+| [completions](completions.md) | | Generate shell completion scripts |
+
+## Reference
+
+| Page | Description |
+|------|-------------|
+| [Server API](api.md) | HTTP endpoints exposed by `cook server`, for building integrations |
 
 ## Installation
 
@@ -50,8 +58,11 @@ cargo install cookcli
 
 ## Quick Start
 
+`cook seed` populates its target directory with recipe files and folders, so create a dedicated directory first:
+
 ```bash
-cook seed                                     # Create example recipes
+mkdir my-recipes && cd my-recipes
+cook seed ./                                  # Create example recipes
 cook recipe "Neapolitan Pizza"                # View a recipe
 cook shopping-list "Neapolitan Pizza" "Easy Pancakes"  # Shopping list
 cook server --open                            # Browse in browser

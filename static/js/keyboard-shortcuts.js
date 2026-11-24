@@ -73,14 +73,70 @@
             return;
         }
 
+        const staticMode = window.__STATIC_MODE__ === true;
+        // `cook server --recipes-only` and nobody signed in: recipes alone.
+        const recipesOnly = window.__RECIPES_ONLY__ === true;
+        const kbd = 'class="px-2 py-1 bg-sunk rounded text-sm font-mono"';
+        const row = (label, keys) => `
+            <div class="flex justify-between items-center">
+                <span class="text-muted">${label}</span>
+                <span>${keys}</span>
+            </div>`;
+        const k = (s) => `<kbd ${kbd}>${s}</kbd>`;
+
+        const navRows = [
+            row('Focus search', k('/')),
+            row('Navigate search results', `${k('&uarr;')} ${k('&darr;')} ${k('Enter')}`),
+            row('Go to recipes', `${k('g')} ${k('h')}`),
+        ];
+        if (!staticMode && !recipesOnly) {
+            navRows.push(
+                row('Go to shopping list', `${k('g')} ${k('s')}`),
+                row('Go to pantry', `${k('g')} ${k('p')}`)
+            );
+        }
+        if (!staticMode) {
+            navRows.push(row('Go to preferences', `${k('g')} ${k('x')}`));
+        }
+
+        // A guest on a server that requires signing in cannot change anything.
+        const canEdit = !staticMode && !recipesOnly && window.__CAN_EDIT__ !== false;
+
+        const recipeRows = [row('Start cooking mode', k('c'))];
+        if (canEdit) {
+            recipeRows.push(
+                row('Edit recipe', k('e')),
+                row('Add to shopping list', k('a'))
+            );
+        }
+        recipeRows.push(row('Print recipe', k('p')));
+        if (!staticMode) {
+            recipeRows.push(
+                row('Increase scale', k('+')),
+                row('Decrease scale', k('-'))
+            );
+        }
+
+        const shoppingSection = !canEdit ? '' : `
+            <div>
+                <h3 class="font-semibold text-text mb-3">Shopping List</h3>
+                <div class="space-y-2">
+                    ${row('Clear all items', k('c'))}
+                </div>
+            </div>`;
+
+        // Translated strings are injected by base.html; fall back to English.
+        const strings = window.__STRINGS__ || {};
+        const closeLabel = String(strings.close || 'Close')
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         const modal = document.createElement('div');
         modal.id = 'keyboard-shortcuts-modal';
-        modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50';
+        modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/50';
         modal.innerHTML = `
-            <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] overflow-hidden">
-                <div class="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
-                    <h2 class="text-xl font-bold text-gray-900 dark:text-white">Keyboard Shortcuts</h2>
-                    <button onclick="closeShortcutsHelp()" class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
+            <div class="card shadow-[var(--shadow-overlay)] max-w-2xl w-full mx-4 max-h-[80vh] overflow-hidden">
+                <div class="p-6 border-b border-line flex justify-between items-center">
+                    <h2 class="text-title font-bold text-text">Keyboard Shortcuts</h2>
+                    <button onclick="closeShortcutsHelp()" class="icon-btn" aria-label="${closeLabel}">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                         </svg>
@@ -89,93 +145,26 @@
                 <div class="p-6 overflow-y-auto max-h-[60vh]">
                     <div class="grid md:grid-cols-2 gap-6">
                         <div>
-                            <h3 class="font-semibold text-gray-900 dark:text-white mb-3">Navigation</h3>
+                            <h3 class="font-semibold text-text mb-3">Navigation</h3>
+                            <div class="space-y-2">${navRows.join('')}</div>
+                        </div>
+                        <div>
+                            <h3 class="font-semibold text-text mb-3">General</h3>
                             <div class="space-y-2">
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Focus search</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">/</kbd>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Navigate search results</span>
-                                    <span><kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">&uarr;</kbd> <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">&darr;</kbd> <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">Enter</kbd></span>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Go to recipes</span>
-                                    <span><kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">g</kbd> <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">h</kbd></span>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Go to shopping list</span>
-                                    <span><kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">g</kbd> <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">s</kbd></span>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Go to pantry</span>
-                                    <span><kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">g</kbd> <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">p</kbd></span>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Go to preferences</span>
-                                    <span><kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">g</kbd> <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">x</kbd></span>
-                                </div>
+                                ${row('Toggle theme', k('t'))}
+                                ${row('Show shortcuts', k('?'))}
+                                ${row('Close modal', k('Esc'))}
                             </div>
                         </div>
                         <div>
-                            <h3 class="font-semibold text-gray-900 dark:text-white mb-3">General</h3>
-                            <div class="space-y-2">
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Toggle theme</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">t</kbd>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Show shortcuts</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">?</kbd>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Close modal</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">Esc</kbd>
-                                </div>
-                            </div>
+                            <h3 class="font-semibold text-text mb-3">Recipe Page</h3>
+                            <div class="space-y-2">${recipeRows.join('')}</div>
                         </div>
-                        <div>
-                            <h3 class="font-semibold text-gray-900 dark:text-white mb-3">Recipe Page</h3>
-                            <div class="space-y-2">
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Start cooking mode</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">c</kbd>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Edit recipe</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">e</kbd>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Add to shopping list</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">a</kbd>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Print recipe</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">p</kbd>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Increase scale</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">+</kbd>
-                                </div>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Decrease scale</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">-</kbd>
-                                </div>
-                            </div>
-                        </div>
-                        <div>
-                            <h3 class="font-semibold text-gray-900 dark:text-white mb-3">Shopping List</h3>
-                            <div class="space-y-2">
-                                <div class="flex justify-between items-center">
-                                    <span class="text-gray-600 dark:text-gray-400">Clear all items</span>
-                                    <kbd class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono">c</kbd>
-                                </div>
-                            </div>
-                        </div>
+                        ${shoppingSection}
                     </div>
                 </div>
-                <div class="p-4 border-t border-gray-200 dark:border-gray-700 text-center text-sm text-gray-500 dark:text-gray-400">
-                    Press <kbd class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs font-mono">Esc</kbd> to close
+                <div class="p-4 border-t border-line text-center text-sm text-faint">
+                    Press <kbd class="px-1 py-0.5 bg-sunk rounded text-xs font-mono">Esc</kbd> to close
                 </div>
             </div>
         `;
@@ -220,6 +209,8 @@
         if (pendingKey === 'g') {
             clearPendingKey();
             const pfx = window.__PREFIX__ || '';
+            const staticMode = window.__STATIC_MODE__ === true;
+            const recipesOnly = window.__RECIPES_ONLY__ === true;
             switch (key) {
                 case 'h':
                 case 'r':
@@ -227,14 +218,17 @@
                     window.location.href = pfx + '/';
                     return;
                 case 's':
+                    if (staticMode || recipesOnly) break;
                     event.preventDefault();
                     window.location.href = pfx + '/shopping-list';
                     return;
                 case 'p':
+                    if (staticMode || recipesOnly) break;
                     event.preventDefault();
                     window.location.href = pfx + '/pantry';
                     return;
                 case 'x':
+                    if (staticMode) break;
                     event.preventDefault();
                     window.location.href = pfx + '/preferences';
                     return;
@@ -308,6 +302,7 @@
 
     // Recipe page specific shortcuts
     function handleRecipeShortcuts(event, key) {
+        const staticMode = window.__STATIC_MODE__ === true;
         switch (key) {
             case 'c':
                 event.preventDefault();
@@ -317,6 +312,7 @@
                 return;
 
             case 'e':
+                if (staticMode) return;
                 event.preventDefault();
                 // Find and click the edit link
                 const editPfx = (window.__PREFIX__ || '') + '/edit/';
@@ -327,6 +323,7 @@
                 return;
 
             case 'a':
+                if (staticMode) return;
                 event.preventDefault();
                 // Find and click the add to shopping list button
                 const addButton = document.querySelector('button[onclick^="addToShoppingList"]');
@@ -342,42 +339,58 @@
 
             case '+':
             case '=': // = is on the same key as + without shift
+                if (staticMode) return;
                 event.preventDefault();
                 adjustScale(0.5);
                 return;
 
             case '-':
             case '_':
+                if (staticMode) return;
                 event.preventDefault();
                 adjustScale(-0.5);
                 return;
 
             case ']':
+                if (staticMode) return;
                 event.preventDefault();
                 adjustScale(1);
                 return;
 
             case '[':
+                if (staticMode) return;
                 event.preventDefault();
                 adjustScale(-1);
                 return;
         }
     }
 
-    // Adjust recipe scale
+    // Steps land on multiples of this, whatever the scale started at.
+    const SCALE_GRID = 0.5;
+
+    // Adjust recipe scale by `delta`, onto the 0.5 grid. A scale on the grid
+    // moves by exactly `delta`; one between steps, such as 1.667 from a menu,
+    // stops at the nearest step in that direction: + gives 2, − gives 1.5.
     function adjustScale(delta) {
-        const scaleInput = document.getElementById('scale');
+        // A recipe that declares servings has a servings stepper instead.
+        const scaleInput = document.getElementById('scale') || document.getElementById('servings');
         if (!scaleInput) return;
 
-        let newValue = parseFloat(scaleInput.value) + delta;
         const min = parseFloat(scaleInput.min) || 0.5;
-        const max = parseFloat(scaleInput.max) || 200;
+        // The servings stepper has no max.
+        const max = scaleInput.max === '' ? Infinity : parseFloat(scaleInput.max);
 
-        // Clamp to valid range
+        let newValue = parseFloat(scaleInput.value) + delta;
+        if (!Number.isFinite(newValue)) newValue = min;
+
+        // Round back toward where the step started. The epsilon keeps a value
+        // already on the grid (up to floating point noise) where it is.
+        const steps = newValue / SCALE_GRID;
+        newValue = (delta > 0 ? Math.floor(steps + 1e-9) : Math.ceil(steps - 1e-9)) * SCALE_GRID;
+
+        // Clamp to valid range, after snapping: a recipe opened from a menu
+        // can have a minimum such as 0.25, below the first step.
         newValue = Math.max(min, Math.min(max, newValue));
-
-        // Round to avoid floating point issues
-        newValue = Math.round(newValue * 10) / 10;
 
         if (newValue !== parseFloat(scaleInput.value)) {
             scaleInput.value = newValue;
@@ -386,10 +399,15 @@
         }
     }
 
+    // The recipe page's −/+ stepper buttons call this too, so the clamping,
+    // rounding and no-op guard live in exactly one place.
+    window.adjustScale = adjustScale;
+
     // Shopping list page specific shortcuts
     function handleShoppingListShortcuts(event, key) {
         switch (key) {
             case 'c':
+                if (window.__CAN_EDIT__ === false) return;
                 event.preventDefault();
                 // Clear the list (if the function exists)
                 if (typeof clearList === 'function') {

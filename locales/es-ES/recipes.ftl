@@ -13,12 +13,21 @@ recipe-ingredients = Ingredientes
 recipe-steps = Instrucciones
 recipe-notes = Notas
 recipe-cookware = Utensilios
+recipe-optional = (opcional)
 recipe-timers = Temporizadores
 recipe-tags = Etiquetas
 recipe-add-to-shopping = Agregar a la lista de compras
 recipe-add-all-to-shopping = Agregar todo a la lista de compras
 recipe-scale-label = Escala
 recipe-servings-label = porciones
+recipe-written-for =
+    { $count ->
+        [one] Escrita para { $count } porción
+       *[other] Escrita para { $count } porciones
+    }
+recipe-written-for-hint = Las cantidades se han recalculado a partir de la receta original. Los tiempos de cocción, el tamaño de los moldes y el condimento pueden necesitar ajustes. Selecciona para volver a las porciones originales.
+recipe-scaled-from-original = ×{ $factor } de la receta original
+recipe-scaled-from-original-hint = Las cantidades se han recalculado a partir de la receta original. Los tiempos de cocción, el tamaño de los moldes y el condimento pueden necesitar ajustes. Selecciona para volver a la receta original.
 recipe-print = Imprimir receta
 recipe-added = ¡Agregado!
 recipe-main-section = Principal
@@ -39,8 +48,39 @@ meta-description = Descripción
 
 # Recipe Types
 recipe-type-menu = Menú
+recipe-type-plan = Plan de comidas
+plan-outside = Fuera de este plan
+plan-nothing-planned = Nada previsto
+plan-add-to = Añadir a { $meal }, { $day }
+plan-line-actions = Cambiar
+plan-move-to = Mover a…
+plan-copy-to = Copiar a…
+plan-remove = Quitar
+plan-move-title = Mover a otro día
+plan-copy-title = Copiar a otro día
+plan-move = Mover
+plan-copy = Copiar
+plan-target-day = Día
+plan-target-meal = Comida
+plan-changed = El plan ha cambiado desde que se cargó la página. Recárgala para verlo e inténtalo de nuevo.
+plan-save-failed = No se pudo guardar el plan.
+plan-saved = Plan guardado
+plan-reload = Recargar
+plan-pick-label = Días para la lista de la compra
+plan-pick-all = Todos
+plan-pick-week = Próximos 7 días
+plan-pick-none = Ninguno
+plan-add-days = Añadir días a la lista de la compra
 
 # Today's Menu Banner
 todays-menu-title = Menú de Hoy
 todays-menu-from = De
 todays-menu-view = Ver Menú
+
+# Sort Controls
+sort-by = Ordenar por:
+sort-name = Nombre
+sort-modified = Modificado
+sort-created = Creado
+sort-direction-toggle = Invertir orden
+random-recipe = Receta al azar

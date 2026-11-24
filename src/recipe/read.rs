@@ -29,16 +29,18 @@
 // SOFTWARE.
 
 use anyhow::{Context as _, Result};
-use clap::{Args, CommandFactory, ValueEnum};
+use clap::{Args, ValueEnum};
 use std::io::Read;
 
 use camino::Utf8PathBuf;
 
 use crate::{
-    util::{split_recipe_name_and_scaling_factor, write_to_output, PARSER},
+    util::{
+        format::{self, Style},
+        split_recipe_name_and_scaling_factor, write_to_output, PARSER,
+    },
     Context,
 };
-use cooklang_find::RecipeEntry;
 
 #[derive(Debug, Args)]
 pub struct ReadArgs {
@@ -74,6 +76,43 @@ pub struct ReadArgs {
     /// Has no effect on human, cooklang, or markdown formats.
     #[arg(long)]
     pretty: bool,
+
+    /// Paper size for LaTeX and Typst output (default: a4)
+    ///
+    /// Has no effect on other formats.
+    #[arg(short = 'p', long, value_enum)]
+    paper_size: Option<PaperSizeArg>,
+
+    /// Page margin in centimeters for LaTeX and Typst output (default: 2.5)
+    ///
+    /// Applied equally to all four sides. Has no effect on other formats.
+    #[arg(short, long)]
+    margin: Option<f64>,
+}
+
+/// Clap's view of [`format::PaperSize`].
+///
+/// The paper names themselves live in `cookcli-core`, which must not depend on
+/// clap; this enum exists only to derive [`ValueEnum`], and its variants must
+/// stay in step with core's so that `--paper-size` keeps accepting the same
+/// values.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PaperSizeArg {
+    A4,
+    Letter,
+    A5,
+    Legal,
+}
+
+impl From<PaperSizeArg> for format::PaperSize {
+    fn from(value: PaperSizeArg) -> Self {
+        match value {
+            PaperSizeArg::A4 => format::PaperSize::A4,
+            PaperSizeArg::Letter => format::PaperSize::Letter,
+            PaperSizeArg::A5 => format::PaperSize::A5,
+            PaperSizeArg::Legal => format::PaperSize::Legal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -95,46 +134,49 @@ enum OutputFormat {
 }
 
 pub fn run(ctx: &Context, args: ReadArgs) -> Result<()> {
-    let mut scale = args.input.scale;
-
-    let (recipe, title) = if let Some(query) = args.input.recipe {
-        let (name, scaling_factor) = split_recipe_name_and_scaling_factor(query.as_str())
-            .map(|(name, scaling_factor)| {
-                let target = scaling_factor.parse::<f64>().unwrap_or_else(|err| {
-                    let mut cmd = crate::args::CliArgs::command();
-                    cmd.error(
-                        clap::error::ErrorKind::InvalidValue,
-                        format!("Invalid scaling target for '{name}': {err}. Use a number value after : to specify a scaling factor."),
-                    )
-                    .exit()
-                });
-                (name, Some(target))
-            })
-            .unwrap_or((query.as_str(), None));
-
-        if let Some(scaling_factor) = scaling_factor {
-            scale = scaling_factor;
+    // `name:factor` is this CLI's argument spelling, so it is unpicked here
+    // rather than in core, which takes the factor as its own field.
+    let (source, scale) = match args.input.recipe {
+        Some(query) => match split_recipe_name_and_scaling_factor(query.as_str()) {
+            Some((name, factor)) => (
+                cookcli_core::RecipeSource::Path(Utf8PathBuf::from(name)),
+                factor,
+            ),
+            None => (cookcli_core::RecipeSource::Path(query), args.input.scale),
+        },
+        None => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .context("Failed to read stdin")?;
+            (
+                cookcli_core::RecipeSource::Content {
+                    text: buf,
+                    name: "stdin".to_string(),
+                },
+                args.input.scale,
+            )
         }
-
-        let recipe_entry = cooklang_find::get_recipe(vec![ctx.base_path().clone()], name.into())
-            .map_err(|e| anyhow::anyhow!("Recipe not found: {}", e))?;
-        let recipe = crate::util::parse_recipe_from_entry(&recipe_entry, scale)?;
-        (recipe, recipe_entry.name().clone().unwrap_or(String::new()))
-    } else {
-        // Read from stdin and create a RecipeEntry
-        let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .context("Failed to read stdin")?;
-
-        // Create a RecipeEntry from the stdin content
-        let recipe_entry = RecipeEntry::from_content(buf, Some("stdin".to_string()))
-            .context("Failed to create recipe entry from stdin")?;
-
-        // Use the same parsing function as for file-based recipes
-        let recipe = crate::util::parse_recipe_from_entry(&recipe_entry, scale)?;
-        (recipe, recipe_entry.name().clone().unwrap_or(String::new()))
     };
+
+    let outcome = cookcli_core::recipe::read(
+        // `cook recipe` reads neither aisle nor pantry, so it asks for no
+        // configuration rather than making `Context` go looking for some.
+        &cookcli_core::Context::new(ctx.base_path().to_path_buf()),
+        cookcli_core::recipe::ReadRequest { source, scale },
+    )
+    .map_err(crate::util::cli_error)?;
+
+    let recipe = outcome.value.recipe;
+    let title = outcome.value.title;
+
+    // Attribute each warning to the recipe it came from, as the shared parsing
+    // helper used to. Core keeps diagnostics structured; naming them is the
+    // CLI's job. `Diagnostic::location` also carries the file, which commands
+    // reading many recipes at once may prefer.
+    for diagnostic in &outcome.diagnostics {
+        tracing::warn!("Recipe '{}': {}", title, diagnostic.message);
+    }
 
     let format = args.format.unwrap_or_else(|| match &args.output {
         Some(p) => match p.extension() {
@@ -152,14 +194,29 @@ pub fn run(ctx: &Context, args: ReadArgs) -> Result<()> {
         None => OutputFormat::Human,
     });
 
-    write_to_output(args.output.as_deref(), |writer| {
+    if !matches!(format, OutputFormat::Latex | OutputFormat::Typst) {
+        if args.paper_size.is_some() {
+            eprintln!("warning: --paper-size has no effect with the selected output format");
+        }
+        if args.margin.is_some() {
+            eprintln!("warning: --margin has no effect with the selected output format");
+        }
+    }
+
+    let paper_size: format::PaperSize = args.paper_size.unwrap_or(PaperSizeArg::A4).into();
+    let margin = args.margin.unwrap_or(2.5);
+
+    write_to_output(args.output.as_deref(), |mut writer| {
         match format {
-            OutputFormat::Human => crate::util::cooklang_to_human::print_human(
+            // `Style::Ansi` keeps the terminal colours the CLI has always
+            // printed; `write_to_output` strips them again for file output.
+            OutputFormat::Human => format::human::print_human(
                 &recipe,
                 &title,
                 scale,
                 PARSER.converter(),
-                writer,
+                Style::Ansi,
+                &mut writer,
             )?,
             OutputFormat::Json => {
                 if args.pretty {
@@ -168,32 +225,30 @@ pub fn run(ctx: &Context, args: ReadArgs) -> Result<()> {
                     serde_json::to_writer(writer, &recipe)?;
                 }
             }
-            OutputFormat::Cooklang => {
-                crate::util::cooklang_to_cooklang::print_cooklang(&recipe, writer)?
-            }
+            OutputFormat::Cooklang => format::cooklang::print_cooklang(&recipe, writer)?,
             OutputFormat::Yaml => serde_yaml::to_writer(writer, &recipe)?,
-            OutputFormat::Markdown => crate::util::cooklang_to_md::print_md(
+            OutputFormat::Markdown => {
+                format::markdown::print_md(&recipe, &title, scale, PARSER.converter(), writer)?
+            }
+            OutputFormat::Latex => format::latex::print_latex(
                 &recipe,
                 &title,
                 scale,
                 PARSER.converter(),
                 writer,
+                paper_size,
+                margin,
             )?,
-            OutputFormat::Latex => crate::util::cooklang_to_latex::print_latex(
+            OutputFormat::Typst => format::typst::print_typst(
                 &recipe,
                 &title,
                 scale,
                 PARSER.converter(),
                 writer,
+                paper_size,
+                margin,
             )?,
-            OutputFormat::Typst => crate::util::cooklang_to_typst::print_typst(
-                &recipe,
-                &title,
-                scale,
-                PARSER.converter(),
-                writer,
-            )?,
-            OutputFormat::Schema => crate::util::cooklang_to_schema::print_schema(
+            OutputFormat::Schema => format::schema::print_schema(
                 &recipe,
                 &title,
                 scale,

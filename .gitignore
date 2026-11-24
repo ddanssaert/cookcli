@@ -1,6 +1,7 @@
 target/
 .DS_Store
 releases
+dist/
 node_modules/
 static/css/output.css
 static/js/editor.bundle.js
@@ -25,3 +26,9 @@ playwright/.cache/
 .shopping_list.txt.bak
 .shopping-list
 .shopping-checked
+
+# insta rejects pending snapshots as .snap.new
+*.snap.new
+
+# Git worktrees for isolated feature work
+.worktrees/

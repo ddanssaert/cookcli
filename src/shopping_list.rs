@@ -28,22 +28,20 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use anyhow::{Context as _, Result};
-use camino::Utf8PathBuf;
+use anyhow::Result;
+use camino::{Utf8Path, Utf8PathBuf};
+use chrono::NaiveDate;
 use clap::{Args, ValueEnum};
-use std::collections::BTreeMap;
 use tracing::warn;
-use yansi::Paint;
 
-use cooklang::{
-    aisle::AisleConf,
-    ingredient_list::IngredientList,
-    quantity::{GroupedQuantity, Quantity, Value},
+use cookcli_core::{
+    format::shopping_list as fmt,
+    shopping_list::{generate, DayRange, GenerateRequest, ScaledRecipe},
+    ConfigSource,
 };
-use serde::Serialize;
 
 use crate::{
-    util::{extract_ingredients, write_to_output, PARSER},
+    util::{cli_error, format::Style, split_recipe_name_and_scaling_factor, write_to_output},
     Context,
 };
 
@@ -95,17 +93,141 @@ pub struct ShoppingListArgs {
     #[arg(long)]
     pretty: bool,
 
-    /// Load aisle conf file
-    #[arg(short, long)]
+    /// Load aisle configuration file
+    ///
+    /// The aisle file groups ingredients into categories (produce, dairy, etc.)
+    /// so the shopping list is organized by store section.
+    ///
+    /// If not specified, the tool looks for `aisle.conf` in `./config/` and then
+    /// in the global config directory (`~/.config/cook/` or the platform
+    /// equivalent).
+    #[arg(short, long, value_hint = clap::ValueHint::FilePath)]
     aisle: Option<Utf8PathBuf>,
 
+    /// Load pantry configuration file
+    ///
+    /// Ingredients you already have on hand are subtracted from the shopping
+    /// list. The pantry file is TOML, with optional quantities and dates.
+    ///
+    /// If not specified, the tool looks for `pantry.conf` in `./config/` and then
+    /// in the global config directory (`~/.config/cook/` or the platform
+    /// equivalent). Use --ignore-pantry to skip pantry subtraction entirely.
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    pantry: Option<Utf8PathBuf>,
+
     /// Don't expand referenced recipes
+    ///
+    /// By default, recipes referenced from within a recipe (via @./other.cook)
+    /// are expanded and their ingredients included. This flag treats each recipe
+    /// in isolation.
     #[arg(short, long)]
     ignore_references: bool,
+
+    /// Don't subtract pantry items from the shopping list
+    ///
+    /// By default, ingredients found in the pantry configuration are subtracted
+    /// from the shopping list. This flag includes every ingredient regardless of
+    /// what's in the pantry, and skips loading the pantry file altogether.
+    #[arg(long)]
+    ignore_pantry: bool,
 
     /// Display only ingredient names, one per line, without amounts
     #[arg(long)]
     ingredients_only: bool,
+
+    /// Add an extra item that no recipe calls for
+    ///
+    /// For the paper towels and bin bags you want on the same shopping trip.
+    /// Repeat the flag for each item. Each value is a Cooklang ingredient
+    /// written without the leading `@`: a bare name for something with no
+    /// amount, or the brace form to give one.
+    ///
+    /// Examples:
+    ///   --extra "paper towels"        # no amount
+    ///   --extra "eggs{12}"            # a count
+    ///   --extra "flour{200%g}"        # an amount and unit
+    ///
+    /// Extra items are merged with the recipe ingredients, so one that shares a
+    /// name with an ingredient a recipe already needs adds to it, is grouped
+    /// into its aisle category, and is subtracted from by the pantry.
+    #[arg(long, value_name = "ITEM")]
+    extra: Vec<String>,
+
+    /// Include optional ingredients
+    ///
+    /// Ingredients a recipe marks as optional (`@?chives`) are left off the
+    /// list by default, along with everything an optional recipe reference
+    /// (`@?./sauce{}`) would add. This flag includes them, marked as optional
+    /// and kept apart from any required amount of the same ingredient.
+    #[arg(long)]
+    include_optional: bool,
+
+    /// Shop for a menu's days from this date on
+    ///
+    /// A menu's days are its sections whose name holds a `YYYY-MM-DD` date,
+    /// as meal plans and the web editor write them: `== Wednesday (2026-10-07) ==`
+    /// or `= 2026-10-07 Dinner`. With
+    /// `--from` and/or `--to`, only the days in that range go on the list:
+    /// the recipes they reference and the ingredients written into them.
+    /// Sections with no date are left out too. A recipe, or a menu with no
+    /// dated section, is taken whole.
+    ///
+    /// Takes a date (`2026-10-07`) or `today`.
+    ///
+    /// Examples:
+    ///   cook shopping-list Plans/October.menu --from 2026-10-07 --to 2026-10-13
+    ///   cook shopping-list Week.menu --from today
+    #[arg(long, value_name = "DATE", value_parser = parse_day, verbatim_doc_comment)]
+    from: Option<NaiveDate>,
+
+    /// Shop for a menu's days up to this date, included
+    ///
+    /// See `--from`. Takes a date (`2026-10-13`) or `today`.
+    #[arg(long, value_name = "DATE", value_parser = parse_day)]
+    to: Option<NaiveDate>,
+}
+
+/// Refuse to write the shopping list over one of the recipes it was built
+/// from.
+///
+/// The comparison is canonical on both sides: symlinks and `./` segments make
+/// a byte-wise path check unreliable, and the recipe side can be a bare name
+/// that only resolves through `cooklang-find`. An output that does not exist
+/// yet can only be skipped — a missing file is never an input.
+fn refuse_output_over_input(ctx: &Context, output: &Utf8Path, recipes: &[String]) -> Result<()> {
+    let Ok(output_path) = std::fs::canonicalize(output) else {
+        return Ok(());
+    };
+    let Some(output_path) = Utf8PathBuf::from_path_buf(output_path).ok() else {
+        return Ok(());
+    };
+
+    for recipe in recipes {
+        let (name, _) =
+            split_recipe_name_and_scaling_factor(recipe).unwrap_or((recipe.as_str(), 1.0));
+        let Ok(entry) = cookcli_core::find::get_recipe(ctx.base_path(), name) else {
+            continue;
+        };
+        let Some(path) = entry.path() else {
+            continue;
+        };
+        let Ok(canonical) = std::fs::canonicalize(path.as_std_path()) else {
+            continue;
+        };
+        if Utf8Path::from_path(&canonical).is_some_and(|p| p == output_path) {
+            anyhow::bail!("Output path '{output}' is an input recipe; refusing to overwrite it");
+        }
+    }
+    Ok(())
+}
+
+/// A day on the command line: `YYYY-MM-DD`, or `today` in local time.
+fn parse_day(value: &str) -> std::result::Result<NaiveDate, String> {
+    if value.eq_ignore_ascii_case("today") {
+        return Ok(chrono::Local::now().date_naive());
+    }
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| format!("expected a date as YYYY-MM-DD, or `today`, not `{value}`"))
 }
 
 impl ShoppingListArgs {
@@ -125,6 +247,7 @@ enum OutputFormat {
 pub fn run(ctx: &Context, args: ShoppingListArgs) -> Result<()> {
     // Expand directories to .cook files
     let mut expanded_recipes = Vec::new();
+    let mut empty_dirs = Vec::new();
     for entry in &args.recipes {
         let path = if entry.contains(':') {
             // Handle recipe:scaling syntax
@@ -136,12 +259,19 @@ pub fn run(ctx: &Context, args: ShoppingListArgs) -> Result<()> {
 
         // Check if it's a directory
         if path.is_dir() {
-            // Find all .cook files in the directory
+            let mut found = false;
+            let mut menus = 0usize;
+            // Find all .cook files in the directory, skipping hidden ones such
+            // as macOS `._<name>.cook` AppleDouble companions (#555)
             for dir_entry in std::fs::read_dir(&path)? {
                 let dir_entry = dir_entry?;
+                if dir_entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
                 let file_path = dir_entry.path();
                 if let Some(ext) = file_path.extension() {
                     if ext == "cook" {
+                        found = true;
                         if let Ok(utf8_path) = Utf8PathBuf::from_path_buf(file_path) {
                             // Preserve the scaling factor if it was specified
                             if entry.contains(':') {
@@ -151,8 +281,13 @@ pub fn run(ctx: &Context, args: ShoppingListArgs) -> Result<()> {
                                 expanded_recipes.push(utf8_path.to_string());
                             }
                         }
+                    } else if ext == "menu" {
+                        menus += 1;
                     }
                 }
+            }
+            if !found {
+                empty_dirs.push((path, menus));
             }
         } else {
             // Not a directory, use as-is
@@ -162,75 +297,54 @@ pub fn run(ctx: &Context, args: ShoppingListArgs) -> Result<()> {
 
     // If no recipes were expanded (empty directory or no directories), use original list
     if expanded_recipes.is_empty() && !args.recipes.is_empty() {
+        // Falling back to the raw arguments made a directory full of menus —
+        // or of nothing edible — report itself as a missing recipe. Name what
+        // was actually wrong.
+        if let Some((dir, menus)) = empty_dirs.into_iter().next() {
+            let mut msg = format!("Directory '{dir}' contains no .cook files");
+            if menus > 0 {
+                msg.push_str(&format!(
+                    " — it has {menus} .menu file(s) that can be passed by name"
+                ));
+            }
+            anyhow::bail!(msg);
+        }
         expanded_recipes = args.recipes.clone();
+    } else {
+        for (dir, menus) in empty_dirs {
+            if menus > 0 {
+                warn!("{dir} contains no .cook files (only {menus} .menu file(s))");
+            } else {
+                warn!("{dir} contains no .cook files");
+            }
+        }
     }
 
-    let aile_path = args
-        .aisle
-        .or_else(|| ctx.aisle())
-        .map(|path| -> Result<(_, _)> {
-            let content = std::fs::read_to_string(&path).context("Failed to read aisle file")?;
-            Ok((path, content))
-        })
-        .transpose()?;
-
-    let aisle = if let Some((_path, content)) = &aile_path {
-        // Use parse_lenient to be more forgiving with aisle configuration
-        let result = cooklang::aisle::parse_lenient(content);
-
-        // Check if there are any warnings to display
-        if result.report().has_warnings() {
-            for warning in result.report().warnings() {
-                warn!("Aisle configuration warning: {}", warning);
-            }
-        }
-
-        // Get the output - parse_lenient should always return something
-        result.output().cloned().unwrap_or_else(|| {
-            warn!("Aisle file parsing failed, using default configuration");
-            Default::default()
-        })
-    } else {
-        warn!("No aisle file found. Docs https://cooklang.org/docs/spec/#shopping-lists");
-        Default::default()
-    };
-
-    // Load pantry configuration if available
-    let pantry_path = ctx.pantry();
-    let pantry = if let Some(path) = &pantry_path {
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                tracing::debug!("Loading pantry from: {}", path);
-                let result = cooklang::pantry::parse_lenient(&content);
-
-                // Check if there are any warnings to display
-                if result.report().has_warnings() {
-                    for warning in result.report().warnings() {
-                        warn!("Pantry configuration warning: {}", warning);
-                    }
-                }
-
-                let mut pantry_conf = result.output().cloned();
-                if let Some(ref mut pantry) = pantry_conf {
-                    pantry.rebuild_index();
-                    tracing::debug!(
-                        "Pantry loaded successfully with {} sections",
-                        pantry.sections.len()
-                    );
-                } else {
-                    tracing::warn!("Failed to parse pantry file");
-                }
-                pantry_conf
-            }
-            Err(e) => {
-                warn!("Failed to read pantry file: {}", e);
-                None
-            }
-        }
-    } else {
-        tracing::debug!("No pantry file found");
-        None
-    };
+    // Aisle and pantry resolution: an explicit flag wins, and otherwise the
+    // context's own search order (local `config/`, then the global config
+    // directory) stands. `--ignore-pantry` skips the pantry altogether, which
+    // core spells as "no pantry configuration".
+    let mut core_ctx = ctx.clone();
+    if let Some(path) = args.aisle {
+        core_ctx = core_ctx.with_aisle(ConfigSource::Path(path));
+    }
+    if args.ignore_pantry {
+        tracing::debug!("Pantry ignored via --ignore-pantry");
+        core_ctx = core_ctx.with_pantry(ConfigSource::None);
+    } else if let Some(path) = args.pantry {
+        // A pantry the user named by hand that cannot be read is fatal: they
+        // asked for it, so silently shopping for things they already own would
+        // be the wrong answer.
+        core_ctx = core_ctx.with_pantry(ConfigSource::Path(path));
+    } else if let Err(e) = core_ctx.pantry().read() {
+        // A merely discovered pantry is different: nobody asked for it, so an
+        // unreadable one is a warning and the list is built without it. The
+        // probe costs one extra read of a small file, and is what keeps the
+        // distinction honest — checking that the path exists is not enough,
+        // because a file can exist and still refuse to be read.
+        warn!("Failed to read pantry file: {e}");
+        core_ctx = core_ctx.with_pantry(ConfigSource::None);
+    }
 
     let format = args.format.unwrap_or_else(|| match &args.output {
         Some(p) => match p.extension() {
@@ -240,30 +354,58 @@ pub fn run(ctx: &Context, args: ShoppingListArgs) -> Result<()> {
         None => OutputFormat::Human,
     });
 
-    // retrieve, scale and merge ingredients
-    let mut list = IngredientList::new();
-    let mut seen = BTreeMap::new();
+    let days = match (args.from, args.to) {
+        (None, None) => None,
+        (Some(from), Some(to)) if from > to => {
+            anyhow::bail!("--from {from} comes after --to {to}, so no day is in between");
+        }
+        (from, to) => Some(DayRange { from, to }),
+    };
 
-    let ignore_references = args.ignore_references;
+    // `name:factor` is this CLI's argument spelling, so it is unpicked here
+    // rather than in core, which takes the factor as its own field.
+    let recipes = expanded_recipes
+        .iter()
+        .map(|entry| match split_recipe_name_and_scaling_factor(entry) {
+            Some((name, scale)) => {
+                ScaledRecipe::scaled(cookcli_core::RecipeSource::Path(name.into()), scale)
+            }
+            None => ScaledRecipe::new(cookcli_core::RecipeSource::Path(entry.as_str().into())),
+        })
+        .map(|recipe| match days {
+            Some(days) => recipe.on_days(days),
+            None => recipe,
+        })
+        .collect();
 
-    for entry in expanded_recipes {
-        extract_ingredients(
-            &entry,
-            &mut list,
-            &mut seen,
-            ctx.base_path(),
-            PARSER.converter(),
-            ignore_references,
-            None, // CLI always includes all references
-        )?;
+    let outcome = generate(
+        &core_ctx,
+        GenerateRequest {
+            recipes,
+            ignore_references: args.ignore_references,
+            extra_items: args.extra,
+            include_optional: args.include_optional,
+        },
+    )
+    .map_err(cli_error)?;
+
+    // Core returns its warnings instead of logging them, so that a library
+    // consumer can show them its own way. Naming the file they came from is
+    // this boundary's job — one list can draw on many recipes.
+    for diagnostic in &outcome.diagnostics {
+        match diagnostic.location.as_ref().and_then(|l| l.file.as_ref()) {
+            Some(file) => warn!("{file}: {}", diagnostic.message),
+            None => warn!("{}", diagnostic.message),
+        }
     }
 
-    // Use common names from aisle configuration
-    list = list.use_common_names(&aisle, PARSER.converter());
+    let list = outcome.value;
 
-    // Subtract pantry quantities from shopping list
-    if let Some(pantry_conf) = &pantry {
-        list = list.subtract_pantry(pantry_conf, PARSER.converter());
+    // The inputs are read before the output is written, so `-o` could
+    // silently overwrite one of them: `cook sl m5.cook -o m5.cook` replaced
+    // the recipe with its own shopping list.
+    if let Some(output) = args.output.as_deref() {
+        refuse_output_over_input(ctx, output, &expanded_recipes)?;
     }
 
     write_to_output(args.output.as_deref(), |w| {
@@ -271,14 +413,18 @@ pub fn run(ctx: &Context, args: ShoppingListArgs) -> Result<()> {
             match format {
                 OutputFormat::Human => {
                     // Simple output: one ingredient per line, no amounts
-                    for (ingredient, _quantity) in list {
-                        writeln!(w, "{ingredient}")?;
+                    for item in &list.items {
+                        if item.optional {
+                            writeln!(w, "{} (optional)", item.name)?;
+                        } else {
+                            writeln!(w, "{}", item.name)?;
+                        }
                     }
                 }
                 OutputFormat::Json => {
                     // Output as a JSON array of strings
-                    let ingredients: Vec<String> =
-                        list.into_iter().map(|(ingredient, _)| ingredient).collect();
+                    let ingredients: Vec<&str> =
+                        list.items.iter().map(|i| i.name.as_str()).collect();
                     if args.pretty {
                         serde_json::to_writer_pretty(w, &ingredients)?;
                     } else {
@@ -287,23 +433,26 @@ pub fn run(ctx: &Context, args: ShoppingListArgs) -> Result<()> {
                 }
                 OutputFormat::Yaml => {
                     // Output as a YAML array of strings
-                    let ingredients: Vec<String> =
-                        list.into_iter().map(|(ingredient, _)| ingredient).collect();
+                    let ingredients: Vec<&str> =
+                        list.items.iter().map(|i| i.name.as_str()).collect();
                     serde_yaml::to_writer(w, &ingredients)?;
                 }
                 OutputFormat::Markdown => {
-                    let value = build_md_value(list, &aisle, args.plain, args.ingredients_only);
+                    let value = fmt::build_md_value(list, args.plain, args.ingredients_only);
                     write!(w, "{value}")?;
                 }
             }
         } else {
             match format {
                 OutputFormat::Human => {
-                    let table = build_human_table(list, &aisle, args.plain);
+                    // `Style::Ansi` keeps the green category headings the CLI
+                    // has always printed; `write_to_output` strips them again
+                    // for file output.
+                    let table = fmt::build_human_table(list, args.plain, Style::Ansi);
                     write!(w, "{table}")?;
                 }
                 OutputFormat::Json => {
-                    let value = build_json_value(list, &aisle, args.plain);
+                    let value = fmt::build_json_value(list, args.plain);
                     if args.pretty {
                         serde_json::to_writer_pretty(w, &value)?;
                     } else {
@@ -311,192 +460,16 @@ pub fn run(ctx: &Context, args: ShoppingListArgs) -> Result<()> {
                     }
                 }
                 OutputFormat::Yaml => {
-                    let value = build_yaml_value(list, &aisle);
+                    let value = fmt::build_yaml_value(list, args.plain);
 
                     serde_yaml::to_writer(w, &value)?;
                 }
                 OutputFormat::Markdown => {
-                    let value = build_md_value(list, &aisle, args.plain, args.ingredients_only);
+                    let value = fmt::build_md_value(list, args.plain, args.ingredients_only);
                     write!(w, "{value}")?;
                 }
             }
         }
         Ok(())
     })
-}
-
-fn total_quantity_fmt(qty: &GroupedQuantity, row: &mut tabular::Row) {
-    let content = qty
-        .iter()
-        .map(quantity_fmt)
-        .reduce(|s, q| format!("{s}, {q}"))
-        .unwrap_or_default();
-    row.add_ansi_cell(content);
-}
-
-fn quantity_fmt(qty: &Quantity) -> String {
-    if let Some(unit) = qty.unit() {
-        format!("{} {}", qty.value(), unit)
-    } else {
-        format!("{}", qty.value())
-    }
-}
-
-fn build_human_table(list: IngredientList, aisle: &AisleConf, plain: bool) -> tabular::Table {
-    let mut table = tabular::Table::new("{:<} {:<}");
-    if plain {
-        for (igr, q) in list {
-            let mut row = tabular::Row::new().with_cell(igr);
-            total_quantity_fmt(&q, &mut row);
-            table.add_row(row);
-        }
-    } else {
-        let categories = list.categorize(aisle);
-        for (cat, items) in categories {
-            table.add_heading(format!("[{}]", cat.green()));
-            for (igr, q) in items {
-                let mut row = tabular::Row::new().with_cell(igr);
-                total_quantity_fmt(&q, &mut row);
-                table.add_row(row);
-            }
-        }
-    }
-    table
-}
-
-fn build_md_value(
-    list: IngredientList,
-    aisle: &AisleConf,
-    plain: bool,
-    ingredients_only: bool,
-) -> String {
-    let mut output = String::new();
-
-    let format_ingredient = |ingredient: &str, quantity: &GroupedQuantity| {
-        if ingredients_only {
-            format!("- {ingredient}\n")
-        } else {
-            let quantity_string = quantity
-                .iter()
-                .map(quantity_fmt)
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("- *{quantity_string}* {ingredient}\n")
-        }
-    };
-    if plain {
-        // no categories, simple list
-        for (ingredient, quantity) in list {
-            output.push_str(&format_ingredient(&ingredient, &quantity));
-        }
-    } else {
-        let categories = list.categorize(aisle);
-        for (i, (category, items)) in categories.into_iter().enumerate() {
-            if i > 0 {
-                output.push('\n');
-            }
-            output.push_str(&format!("# {category}\n"));
-            for (ingredient, quantity) in items {
-                output.push_str(&format_ingredient(&ingredient, &quantity));
-            }
-        }
-    }
-    output
-}
-
-fn build_json_value<'a>(
-    list: IngredientList,
-    aisle: &'a AisleConf<'a>,
-    plain: bool,
-) -> serde_json::Value {
-    #[derive(Serialize)]
-    struct Quantity {
-        value: Value,
-        unit: Option<String>,
-    }
-    impl From<cooklang::quantity::Quantity> for Quantity {
-        fn from(qty: cooklang::quantity::Quantity) -> Self {
-            let unit = qty.unit().map(|s| s.to_owned());
-            let value = qty.value().clone();
-            Self { value, unit }
-        }
-    }
-    #[derive(Serialize)]
-    struct Ingredient {
-        name: String,
-        quantity: Vec<Quantity>,
-    }
-    impl From<(String, GroupedQuantity)> for Ingredient {
-        fn from((name, qty): (String, GroupedQuantity)) -> Self {
-            Ingredient {
-                name,
-                quantity: qty.into_vec().into_iter().map(Quantity::from).collect(),
-            }
-        }
-    }
-    #[derive(Serialize)]
-    struct Category {
-        category: String,
-        items: Vec<Ingredient>,
-    }
-
-    if plain {
-        serde_json::to_value(list.into_iter().map(Ingredient::from).collect::<Vec<_>>()).unwrap()
-    } else {
-        serde_json::to_value(
-            list.categorize(aisle)
-                .into_iter()
-                .map(|(category, items)| Category {
-                    category,
-                    items: items.into_iter().map(Ingredient::from).collect(),
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap()
-    }
-}
-
-fn build_yaml_value<'a>(list: IngredientList, aisle: &'a AisleConf<'a>) -> serde_yaml::Value {
-    #[derive(Serialize)]
-    struct Quantity {
-        value: Value,
-        unit: Option<String>,
-    }
-    impl From<cooklang::quantity::Quantity> for Quantity {
-        fn from(qty: cooklang::quantity::Quantity) -> Self {
-            let unit = qty.unit().map(|s| s.to_owned());
-            let value = qty.value().clone();
-            Self { value, unit }
-        }
-    }
-    #[derive(Serialize)]
-    struct Ingredient {
-        name: String,
-        quantity: Vec<Quantity>,
-    }
-    impl From<(String, GroupedQuantity)> for Ingredient {
-        fn from((name, qty): (String, GroupedQuantity)) -> Self {
-            Ingredient {
-                name,
-                quantity: qty.into_vec().into_iter().map(Quantity::from).collect(),
-            }
-        }
-    }
-    #[derive(Serialize)]
-    struct Category {
-        category: String,
-        items: Vec<Ingredient>,
-    }
-
-    // Convert to categorized list and serialize to YAML
-    serde_yaml::to_value(
-        list.categorize(aisle)
-            .into_iter()
-            .map(|(category, items)| Category {
-                category,
-                items: items.into_iter().map(Ingredient::from).collect(),
-            })
-            .collect::<Vec<_>>(),
-    )
-    .unwrap()
 }

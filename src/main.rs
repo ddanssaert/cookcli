@@ -29,34 +29,45 @@
 // SOFTWARE.
 
 use crate::util::resolve_to_absolute_path;
-use anyhow::{bail, Context as AnyhowContext, Result};
+use anyhow::{bail, Result};
 use args::{CliArgs, Command};
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 use clap::Parser;
 
+/// The one `Context` definition, shared with every other consumer of the
+/// library. The CLI adds only the base-path validation in
+/// [`configure_context`]; aisle and pantry discovery is core's.
+pub use cookcli_core::Context;
+
 // commands
+mod build;
+mod completions;
 mod doctor;
+#[cfg(feature = "import")]
 mod import;
+#[cfg(feature = "sync")]
+mod login;
+#[cfg(feature = "sync")]
+mod logout;
+#[cfg(feature = "lsp")]
 mod lsp;
 mod pantry;
 mod recipe;
 mod report;
 mod search;
 mod seed;
+#[cfg(feature = "server")]
 mod server;
 mod shopping_list;
+#[cfg(feature = "sync")]
+mod sync;
 #[cfg(feature = "self-update")]
 mod update;
+mod web;
 
 // other modules
 mod args;
 mod util;
-
-const LOCAL_CONFIG_DIR: &str = "config";
-const APP_NAME: &str = "cook";
-const UTF8_PATH_PANIC: &str = "cook only supports UTF-8 paths.";
-const AUTO_AISLE: &str = "aisle.conf";
-const AUTO_PANTRY: &str = "pantry.conf";
 
 pub fn main() -> Result<()> {
     let args = CliArgs::parse();
@@ -66,79 +77,46 @@ pub fn main() -> Result<()> {
 
     match args.command {
         Command::Recipe(args) => recipe::run(&ctx, args),
+        #[cfg(feature = "server")]
         Command::Server(args) => server::run(ctx, args),
+        Command::Build(args) => build::run(&ctx, args),
         Command::ShoppingList(args) => shopping_list::run(&ctx, args),
         Command::Seed(args) => seed::run(&ctx, args),
         Command::Search(args) => search::run(&ctx, args),
+        #[cfg(feature = "import")]
         Command::Import(args) => import::run(&ctx, args),
         Command::Report(args) => report::run(&ctx, args),
         Command::Doctor(args) => doctor::run(&ctx, args),
         Command::Pantry(args) => pantry::run(&ctx, args),
+        #[cfg(feature = "lsp")]
         Command::Lsp(args) => lsp::run(&ctx, args),
+        #[cfg(feature = "sync")]
+        Command::Login(args) => login::run(&ctx, args),
+        #[cfg(feature = "sync")]
+        Command::Logout(args) => logout::run(&ctx, args),
+        Command::Completions(args) => completions::run(args),
         #[cfg(feature = "self-update")]
         Command::Update(args) => update::run(args),
     }
 }
 
-pub struct Context {
-    base_path: Utf8PathBuf,
-}
-
-impl Context {
-    pub fn new(base_path: Utf8PathBuf) -> Self {
-        Self { base_path }
-    }
-
-    pub fn aisle(&self) -> Option<Utf8PathBuf> {
-        let auto = self.base_path.join(LOCAL_CONFIG_DIR).join(AUTO_AISLE);
-
-        tracing::trace!("checking auto aisle file: {auto}");
-
-        auto.is_file().then_some(auto).or_else(|| {
-            let global = global_file_path(AUTO_AISLE).ok()?;
-            tracing::trace!("checking global auto aisle file: {global}");
-            global.is_file().then_some(global)
-        })
-    }
-
-    pub fn pantry(&self) -> Option<Utf8PathBuf> {
-        let auto = self.base_path.join(LOCAL_CONFIG_DIR).join(AUTO_PANTRY);
-
-        tracing::trace!("checking auto pantry file: {auto}");
-
-        auto.is_file().then_some(auto).or_else(|| {
-            let global = global_file_path(AUTO_PANTRY).ok()?;
-            tracing::trace!("checking global auto pantry file: {global}");
-            global.is_file().then_some(global)
-        })
-    }
-
-    pub fn base_path(&self) -> &Utf8PathBuf {
-        &self.base_path
-    }
-}
-
 fn configure_context() -> Result<Context> {
     let args = CliArgs::parse();
-    let base_path = match args.command {
-        Command::Server(ref server_args) => server_args
-            .get_base_path()
-            .unwrap_or_else(|| Utf8PathBuf::from(".")),
-        Command::ShoppingList(ref shopping_list_args) => shopping_list_args
-            .get_base_path()
-            .unwrap_or_else(|| Utf8PathBuf::from(".")),
-        _ => Utf8PathBuf::from("."),
-    };
+    let base_path = args
+        .command
+        .base_path()
+        .unwrap_or_else(|| Utf8PathBuf::from("."));
 
+    // Core neither resolves nor validates the base path, deliberately. The CLI
+    // does both, so a mistyped `--base-path` fails here with one clear message
+    // rather than as a recipe-not-found from whichever command runs next.
     let absolute_base_path = resolve_to_absolute_path(&base_path)?;
 
     if !absolute_base_path.is_dir() {
         bail!("Base path is not a directory: {}", absolute_base_path);
     }
 
-    Ok(Context {
-        base_path: absolute_base_path,
-    })
+    Ok(Context::discover(absolute_base_path))
 }
 
 fn configure_logging(verbosity: u8) {
@@ -156,12 +134,4 @@ fn configure_logging(verbosity: u8) {
         .compact()
         .with_writer(std::io::stderr)
         .init();
-}
-
-pub fn global_file_path(name: &str) -> Result<Utf8PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", APP_NAME)
-        .context("Could not determine home directory path")?;
-    let config = Utf8Path::from_path(dirs.config_dir()).expect(UTF8_PATH_PANIC);
-    let path = config.join(name);
-    Ok(path)
 }

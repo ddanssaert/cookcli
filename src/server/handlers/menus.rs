@@ -1,20 +1,16 @@
-use super::common::{check_path, json_error};
+use super::common::{check_path, json_error, normalize_tags, not_found};
 use crate::server::AppState;
+use crate::util::inside_collection;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
-use camino::Utf8PathBuf;
-use cooklang_find::RecipeTree;
-use regex::Regex;
+use camino::{Utf8Path, Utf8PathBuf};
+use cooklang_find::{Menu, MenuItem, RecipeTree};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, LazyLock};
-
-static DATE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((\d{4}-\d{2}-\d{2})\)").unwrap());
-static TIME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((\d{2}:\d{2})\)").unwrap());
-static MEAL_HEADER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s*\(\d{2}:\d{2}\)\s*").unwrap());
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Serialize)]
 pub struct MenuListItem {
@@ -50,10 +46,13 @@ pub fn collect_menus(
 pub async fn list_menus(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<MenuListItem>>, (StatusCode, Json<serde_json::Value>)> {
-    let tree = cooklang_find::build_tree(&state.base_path).map_err(|e| {
+    let mut tree = cooklang_find::build_tree(&state.base_path).map_err(|e| {
         tracing::error!("Failed to build recipe tree: {:?}", e);
         (StatusCode::INTERNAL_SERVER_ERROR, json_error(&e))
     })?;
+    // The glob walk follows linked folders; a listing must not publish the
+    // names of files outside the collection (#698).
+    crate::web::builders::prune_outside(&mut tree, &state.base_path);
 
     let mut menus = Vec::new();
     collect_menus(&tree, &state.base_path, &mut menus);
@@ -98,7 +97,14 @@ pub enum MenuMealItem {
     RecipeReference {
         name: String,
         path: Option<String>,
-        scale: Option<f64>,
+        /// Multiplier for the referenced recipe. Always present: a reference
+        /// with no `{...}` target is ×1 before the menu scale is applied.
+        scale: f64,
+        /// The reference is another menu, used as a meal of this one; `path`
+        /// then ends in `.menu`. Only sent when true, so a response without
+        /// menus reads as it always has.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        menu: bool,
     },
     #[serde(rename = "ingredient")]
     Ingredient {
@@ -108,40 +114,8 @@ pub enum MenuMealItem {
     },
 }
 
-/// Extract a date in YYYY-MM-DD format from a section name.
-/// Matches patterns like "Day 1 (2026-03-04)".
-pub fn extract_date(name: &str) -> Option<String> {
-    DATE_RE.captures(name).map(|caps| caps[1].to_string())
-}
-
-/// Extract a time in HH:MM format from a meal type header.
-/// Matches patterns like "Breakfast (08:30):".
-fn extract_time(header: &str) -> Option<String> {
-    TIME_RE.captures(header).map(|caps| caps[1].to_string())
-}
-
-/// Extract the meal type name from a header string.
-/// Strips the trailing colon and any time in parentheses.
-/// "Breakfast (08:30):" -> "Breakfast"
-/// "Dinner:" -> "Dinner"
-pub fn extract_meal_type(header: &str) -> String {
-    // Remove trailing colon (and whitespace around it)
-    let stripped = header.trim().trim_end_matches(':').trim();
-    // Remove time in parentheses
-    MEAL_HEADER_RE.replace_all(stripped, "").trim().to_string()
-}
-
-/// Check if a text line is a meal type header (ends with ":" possibly with whitespace).
-pub fn is_meal_header(text: &str) -> bool {
-    let trimmed = text.trim();
-    // Must end with ':'
-    if !trimmed.ends_with(':') {
-        return false;
-    }
-    // Must have some content before the colon
-    let before_colon = trimmed.trim_end_matches(':').trim();
-    !before_colon.is_empty()
-}
+/// Meal type reported for items before a menu's first meal header.
+const DEFAULT_MEAL_TYPE: &str = "Items";
 
 pub async fn get_menu(
     Path(path): Path<String>,
@@ -161,6 +135,17 @@ pub async fn get_menu(
         )
     })?;
 
+    // `get_recipe` follows links, so `Link/Week.menu` through a
+    // `Link -> /outside` symlink is a hit (#698).
+    if entry
+        .path()
+        .is_some_and(|file| !inside_collection(&state.base_path, file))
+    {
+        // Same answer a missing menu gives, so the link reveals nothing.
+        tracing::error!("{path:?} resolves outside the recipe directory");
+        return Err(not_found("Menu", &path));
+    }
+
     if !entry.is_menu() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -168,298 +153,156 @@ pub async fn get_menu(
         ));
     }
 
-    let recipe = crate::util::parse_recipe_from_entry(&entry, scale).map_err(|e| {
-        tracing::error!("Failed to parse menu: {e}");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json_error(format!("Failed to parse menu: {e}")),
-        )
-    })?;
+    let menu = crate::util::menu::load_menu(&entry, &recipe_path, &state.base_path, scale)
+        .map_err(|e| {
+            tracing::error!("Failed to parse menu: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json_error(format!("Failed to parse menu: {e}")),
+            )
+        })?;
 
-    // Build metadata as a JSON object
-    let metadata = if recipe.metadata.map.is_empty() {
-        serde_json::Value::Object(serde_json::Map::new())
-    } else {
-        let mut map = serde_json::Map::new();
-        for (key, value) in recipe.metadata.map.iter() {
-            if let Some(key_str) = key.as_str() {
-                let val = if let Some(s) = value.as_str() {
-                    serde_json::Value::String(s.to_string())
-                } else if let Some(n) = value.as_i64() {
-                    serde_json::Value::String(n.to_string())
-                } else if let Some(n) = value.as_f64() {
-                    serde_json::Value::String(crate::util::format::format_number(n))
-                } else {
-                    serde_json::Value::Null
-                };
-                map.insert(key_str.to_string(), val);
-            }
-        }
-        serde_json::Value::Object(map)
-    };
+    Ok(Json(menu_response(&menu, path, scale, &state.base_path)))
+}
 
-    // Extract the menu name
-    let menu_name = recipe
-        .metadata
-        .get("title")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            path.split('/')
-                .next_back()
-                .unwrap_or(&path)
-                .replace(".menu", "")
-        });
+/// Shape a [`Menu`] into the API response.
+///
+/// The response keeps the semantics it had before `cooklang-find` parsed
+/// menus: a missing meal type is `"Items"`, text and notes are dropped,
+/// reference names and paths are `./Dir/Name` and `./Dir/Name.cook` (or
+/// `./Dir/Name.menu` for a menu used as a meal), and loose quantities are
+/// scaled and formatted.
+fn menu_response(menu: &Menu, path: String, scale: f64, base_path: &Utf8Path) -> MenuResponse {
+    // Whether each referenced path is a menu, looked up once per path.
+    let mut is_menu: HashMap<String, bool> = HashMap::new();
+    let sections = menu
+        .sections
+        .iter()
+        .map(|section| MenuApiSection {
+            name: section.name.clone(),
+            date: section.date.clone(),
+            meals: section
+                .meals
+                .iter()
+                .filter_map(|meal| {
+                    let items: Vec<_> = meal
+                        .items
+                        .iter()
+                        .filter_map(|item| api_item(item, scale, base_path, &mut is_menu))
+                        .collect();
+                    // A meal of only notes or text has nothing to report.
+                    (!items.is_empty()).then(|| MenuMeal {
+                        meal_type: meal
+                            .meal_type
+                            .clone()
+                            .unwrap_or_else(|| DEFAULT_MEAL_TYPE.to_string()),
+                        time: meal.time.clone(),
+                        items,
+                    })
+                })
+                .collect(),
+        })
+        .collect();
 
-    // Parse sections following the same approach as menu_page_handler in ui.rs
-    let mut sections = Vec::new();
-
-    for section in &recipe.sections {
-        let section_name = section.name.clone();
-        let date = section_name.as_deref().and_then(extract_date);
-
-        // Collect all items in this section as a flat list of (is_text, item) tuples
-        // We first build "lines" similar to ui.rs, then group by meal headers
-        let mut lines: Vec<Vec<LineItem>> = Vec::new();
-
-        for content in &section.content {
-            use cooklang::Content;
-            if let Content::Step(step) = content {
-                let mut step_items: Vec<LineItem> = Vec::new();
-                let mut current_text = String::new();
-
-                for item in &step.items {
-                    use cooklang::Item;
-                    match item {
-                        Item::Text { value } => {
-                            if value == "-" {
-                                // Bullet marker - flush current line
-                                if !current_text.is_empty() {
-                                    step_items.push(LineItem::Text(current_text.clone()));
-                                    current_text.clear();
-                                }
-                                if !step_items.is_empty() {
-                                    lines.push(step_items.clone());
-                                    step_items.clear();
-                                }
-                            } else {
-                                let parts: Vec<&str> = value.split('\n').collect();
-                                for (i, part) in parts.iter().enumerate() {
-                                    if i > 0 {
-                                        if !current_text.is_empty() {
-                                            step_items.push(LineItem::Text(current_text.clone()));
-                                            current_text.clear();
-                                        }
-                                        if !step_items.is_empty() {
-                                            lines.push(step_items.clone());
-                                            step_items.clear();
-                                        }
-                                    }
-                                    if !part.is_empty() {
-                                        current_text.push_str(part);
-                                    }
-                                }
-                            }
-                        }
-                        Item::Ingredient { index } => {
-                            if !current_text.is_empty() {
-                                step_items.push(LineItem::Text(current_text.clone()));
-                                current_text.clear();
-                            }
-
-                            if let Some(ing) = recipe.ingredients.get(*index) {
-                                if let Some(ref recipe_ref) = ing.reference {
-                                    let recipe_scale =
-                                        ing.quantity.as_ref().and_then(|q| match q.value() {
-                                            cooklang::Value::Number(n) => Some(n.value()),
-                                            _ => None,
-                                        });
-                                    let final_scale = recipe_scale.map(|s| s * scale);
-
-                                    let name = if recipe_ref.components.is_empty() {
-                                        recipe_ref.name.clone()
-                                    } else {
-                                        format!(
-                                            "{}/{}",
-                                            recipe_ref.components.join("/"),
-                                            recipe_ref.name
-                                        )
-                                    };
-
-                                    // Build the .cook path for the reference
-                                    let ref_path = format!("{}.cook", name);
-
-                                    step_items.push(LineItem::RecipeRef {
-                                        name,
-                                        path: Some(ref_path),
-                                        scale: final_scale,
-                                    });
-                                } else {
-                                    let quantity = ing.quantity.as_ref().and_then(|q| {
-                                        crate::util::format::format_quantity(q.value())
-                                    });
-                                    let unit = ing
-                                        .quantity
-                                        .as_ref()
-                                        .and_then(|q| q.unit().as_ref().map(|u| u.to_string()));
-
-                                    step_items.push(LineItem::Ingredient {
-                                        name: ing.name.to_string(),
-                                        quantity,
-                                        unit,
-                                    });
-                                }
-                            }
-                        }
-                        _ => {} // Ignore other items in menu files
-                    }
-                }
-
-                if !current_text.is_empty() {
-                    step_items.push(LineItem::Text(current_text));
-                }
-                if !step_items.is_empty() {
-                    lines.push(step_items);
-                }
-            }
-        }
-
-        // Now group lines into meals.
-        // A line that is purely a text item ending with ":" is a meal header.
-        // Everything after it until the next header belongs to that meal.
-        // Items before any header go into a default "Items" meal.
-        let mut meals: Vec<MenuMeal> = Vec::new();
-        let mut current_meal_type = String::from("Items");
-        let mut current_meal_time: Option<String> = None;
-        let mut current_items: Vec<MenuMealItem> = Vec::new();
-
-        for line in &lines {
-            // Check if this line is a meal header: single text item that is a meal header
-            if line.len() == 1 {
-                if let LineItem::Text(ref text) = line[0] {
-                    if is_meal_header(text) {
-                        // Flush previous meal if it has items
-                        if !current_items.is_empty() {
-                            meals.push(MenuMeal {
-                                meal_type: current_meal_type.clone(),
-                                time: current_meal_time.take(),
-                                items: std::mem::take(&mut current_items),
-                            });
-                        }
-                        current_meal_time = extract_time(text);
-                        current_meal_type = extract_meal_type(text);
-                        continue;
-                    }
-                }
-            }
-
-            // Not a meal header - add items to current meal
-            for item in line {
-                match item {
-                    LineItem::Text(_) => {
-                        // Intentionally excluded: plain text in menu items (e.g. "with",
-                        // connectors, whitespace) is decorative. The API returns only
-                        // structured recipe references and ingredients; consumers that
-                        // need the raw text should read the .menu file directly.
-                    }
-                    LineItem::RecipeRef { name, path, scale } => {
-                        current_items.push(MenuMealItem::RecipeReference {
-                            name: name.clone(),
-                            path: path.clone(),
-                            scale: *scale,
-                        });
-                    }
-                    LineItem::Ingredient {
-                        name,
-                        quantity,
-                        unit,
-                    } => {
-                        current_items.push(MenuMealItem::Ingredient {
-                            name: name.clone(),
-                            quantity: quantity.clone(),
-                            unit: unit.clone(),
-                        });
-                    }
-                }
-            }
-        }
-
-        // Flush the last meal
-        if !current_items.is_empty() {
-            meals.push(MenuMeal {
-                meal_type: current_meal_type,
-                time: current_meal_time,
-                items: current_items,
-            });
-        }
-
-        sections.push(MenuApiSection {
-            name: section_name,
-            date,
-            meals,
-        });
-    }
-
-    Ok(Json(MenuResponse {
-        name: menu_name,
+    MenuResponse {
+        name: menu.name.clone(),
         path,
-        metadata,
+        metadata: api_metadata(menu, scale),
         sections,
-    }))
-}
-
-/// Scan all menus for a section whose date matches today.
-/// Returns the first match with menu name, path, and formatted date.
-pub fn find_todays_menu(
-    base_path: &camino::Utf8Path,
-    tree: &RecipeTree,
-) -> Option<crate::server::templates::TodaysMenu> {
-    let now = chrono::Local::now();
-    let today = now.format("%Y-%m-%d").to_string();
-    let today_display = now.format("%A, %B %-d").to_string();
-
-    let mut menus = Vec::new();
-    collect_menus(tree, base_path, &mut menus);
-
-    for menu_item in &menus {
-        let recipe_path = camino::Utf8PathBuf::from(&menu_item.path);
-        let entry = match cooklang_find::get_recipe(vec![base_path], &recipe_path) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let recipe = match crate::util::parse_recipe_from_entry(&entry, 1.0) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        for section in &recipe.sections {
-            let date = section.name.as_deref().and_then(extract_date);
-            if date.as_deref() == Some(today.as_str()) {
-                return Some(crate::server::templates::TodaysMenu {
-                    menu_name: menu_item.name.clone(),
-                    menu_path: menu_item.path.clone(),
-                    date_display: today_display,
-                });
-            }
-        }
     }
-
-    None
 }
 
-/// Internal representation of a line item while parsing.
-#[derive(Clone)]
-enum LineItem {
-    Text(String),
-    RecipeRef {
-        name: String,
-        path: Option<String>,
-        scale: Option<f64>,
-    },
-    Ingredient {
-        name: String,
-        quantity: Option<String>,
-        unit: Option<String>,
-    },
+fn api_item(
+    item: &MenuItem,
+    scale: f64,
+    base_path: &Utf8Path,
+    is_menu: &mut HashMap<String, bool>,
+) -> Option<MenuMealItem> {
+    match item {
+        MenuItem::RecipeReference {
+            path,
+            scale: factor,
+            ..
+        } => {
+            // A reference out of the recipe directory is not looked up —
+            // nor one that leaves it through a link once resolved (#698).
+            let menu = !crate::util::menu::is_outside_reference(path)
+                && *is_menu.entry(path.clone()).or_insert_with(|| {
+                    crate::util::get_recipe(base_path, path).is_ok_and(|entry| {
+                        entry.is_menu()
+                            && entry
+                                .path()
+                                .is_some_and(|file| inside_collection(base_path, file))
+                    })
+                });
+            // The file the reference names: a recipe's `.cook`, or the
+            // `.menu` of a menu used as a meal of this one.
+            let file = if menu {
+                format!("./{}.menu", path.trim_end_matches(".menu"))
+            } else {
+                format!("./{path}.cook")
+            };
+            Some(MenuMealItem::RecipeReference {
+                name: format!("./{path}"),
+                path: Some(file),
+                scale: factor.unwrap_or(1.0),
+                menu,
+            })
+        }
+        MenuItem::Ingredient {
+            name,
+            quantity,
+            unit,
+        } => {
+            let (quantity, unit) =
+                crate::util::menu::scaled_quantity(quantity.as_deref(), unit.as_deref(), scale);
+            Some(MenuMealItem::Ingredient {
+                name: name.clone(),
+                quantity,
+                unit,
+            })
+        }
+        // Text, notes, line breaks and anything added later are not part of
+        // the API.
+        _ => None,
+    }
+}
+
+/// The menu's frontmatter as a JSON object of strings (`tags` stays an array),
+/// with a numeric `servings` scaled like the recipe parser scales it.
+fn api_metadata(menu: &Menu, scale: f64) -> serde_json::Value {
+    // `Metadata` has no way to iterate its entries other than serialising it.
+    let raw = serde_json::to_value(&menu.metadata).unwrap_or_default();
+    let mut map = serde_json::Map::new();
+    for (key, value) in raw.as_object().into_iter().flatten() {
+        let val = if key == "tags" {
+            // `tags` keeps its YAML shape so that a sequence survives:
+            // the stringification below would report `tags: [a, b]` as
+            // null. `normalize_tags` then gives the comma-separated
+            // spelling the same array shape.
+            value.clone()
+        } else if let Some(s) = value.as_str() {
+            serde_json::Value::String(s.to_string())
+        } else if let Some(n) = value.as_i64() {
+            serde_json::Value::String(n.to_string())
+        } else if let Some(n) = value.as_f64() {
+            serde_json::Value::String(crate::util::format::number::format_number(n))
+        } else {
+            serde_json::Value::Null
+        };
+        map.insert(key.clone(), val);
+    }
+    if let Some(base) = menu.metadata.get("servings").and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    }) {
+        let scaled = (base as f64 * scale).round() as u64;
+        map.insert(
+            "servings".to_string(),
+            serde_json::Value::String(scaled.to_string()),
+        );
+    }
+    let mut metadata = serde_json::Value::Object(map);
+    normalize_tags(&mut metadata);
+    metadata
 }

@@ -30,9 +30,15 @@
 
 use clap::{Parser, Subcommand};
 
+#[cfg(feature = "import")]
+use crate::import;
+#[cfg(feature = "lsp")]
+use crate::lsp;
+#[cfg(feature = "server")]
+use crate::server;
 #[cfg(feature = "self-update")]
 use crate::update;
-use crate::{doctor, import, lsp, pantry, recipe, report, search, seed, server, shopping_list};
+use crate::{build, completions, doctor, pantry, recipe, report, search, seed, shopping_list};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -83,7 +89,24 @@ pub enum Command {
         alias = "s",
         long_about = "Run a web server to browse and interact with your recipe collection"
     )]
+    #[cfg(feature = "server")]
     Server(server::ServerArgs),
+
+    /// Build artifacts from your recipe collection
+    ///
+    /// Container for build subcommands. Currently supports `web` (static
+    /// website generation). More targets (e.g. cookbooks) may be added in
+    /// future releases.
+    ///
+    /// Examples:
+    ///   cook build web                         # Build a static website to ./_site
+    ///   cook build web out                     # Build to ./out
+    ///   cook build web --base-path ~/recipes   # Use specific source directory
+    ///   cook build web --base-url /recipes/    # Absolute URL prefix for subpath hosting
+    ///   cook build web --lang fr-FR            # Render the site in French
+    ///   cook build web --compress              # Also write .gz copies for precompressed hosting
+    #[command(long_about = "Build artifacts (static website, etc.) from your recipe collection")]
+    Build(build::BuildArgs),
 
     /// Generate a combined shopping list from multiple recipes
     ///
@@ -143,6 +166,7 @@ pub enum Command {
         alias = "i",
         long_about = "Import recipes from websites and automatically convert them to Cooklang format"
     )]
+    #[cfg(feature = "import")]
     Import(import::ImportArgs),
 
     /// Generate custom reports from recipes using templates
@@ -215,7 +239,46 @@ pub enum Command {
     #[command(
         long_about = "Start the Language Server Protocol server for Cooklang editor integration"
     )]
+    #[cfg(feature = "lsp")]
     Lsp(lsp::LspArgs),
+
+    /// Sign in to CookCloud
+    ///
+    /// Initiates the OAuth 2.0 Device Authorization Grant flow:
+    /// displays a code, opens your browser to the verification page,
+    /// and polls until you approve the request.
+    ///
+    /// Examples:
+    ///   cook login                      # Start the device-code login flow
+    #[cfg(feature = "sync")]
+    #[command(long_about = "Sign in to CookCloud via the OAuth 2.0 device-code flow")]
+    Login(crate::login::LoginArgs),
+
+    /// Sign out of CookCloud
+    ///
+    /// Removes the stored session file. The `cook server` instance, if running,
+    /// will pick up the change on its next status check or restart.
+    ///
+    /// Examples:
+    ///   cook logout
+    #[cfg(feature = "sync")]
+    #[command(long_about = "Sign out of CookCloud and delete the local session file")]
+    Logout(crate::logout::LogoutArgs),
+
+    /// Generate a shell completion script
+    ///
+    /// Prints a completion script for the given shell to stdout. Source it
+    /// from your shell configuration or install it in the shell's completion
+    /// directory to get tab completion for cook subcommands and flags.
+    ///
+    /// Examples:
+    ///   cook completions bash > /usr/local/etc/bash_completion.d/cook
+    ///   cook completions zsh > "${fpath[1]}/_cook"
+    ///   cook completions fish > ~/.config/fish/completions/cook.fish
+    #[command(
+        long_about = "Generate a shell completion script for bash, zsh, fish, PowerShell or elvish"
+    )]
+    Completions(completions::CompletionsArgs),
 
     /// Update CookCLI to the latest version
     ///
@@ -234,4 +297,26 @@ pub enum Command {
     )]
     #[cfg(feature = "self-update")]
     Update(update::UpdateArgs),
+}
+
+impl Command {
+    /// The `--base-path` the command was run with, when it takes one.
+    ///
+    /// `configure_context` resolves it once for every command, so recipe,
+    /// aisle and pantry discovery all agree on the directory (#711): commands
+    /// that kept their own lookup read `./config/` of the working directory
+    /// even with `-b` pointing elsewhere. Sign-in and sync state are not
+    /// affected — they still come only from the global config directory.
+    pub fn base_path(&self) -> Option<camino::Utf8PathBuf> {
+        match self {
+            #[cfg(feature = "server")]
+            Command::Server(args) => args.get_base_path(),
+            Command::Build(args) => args.get_base_path(),
+            Command::ShoppingList(args) => args.get_base_path(),
+            Command::Doctor(args) => args.get_base_path(),
+            Command::Pantry(args) => args.base_path.clone(),
+            Command::Report(args) => args.get_base_path(),
+            _ => None,
+        }
+    }
 }

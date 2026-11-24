@@ -5,7 +5,7 @@
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/cooklang/CookCLI)](https://github.com/cooklang/CookCLI/releases)
 [![GitHub Stars](https://img.shields.io/github/stars/cooklang/CookCLI?style=social)](https://github.com/cooklang/CookCLI)
 
-**Command line tools for working with [Cooklang](https://cooklang.org) recipes.**
+**Command line tools for working with [Cooklang](https://cooklang.org) recipes.** Full reference: [CookCLI documentation](https://cooklang.org/cli/).
 
 ### 🎯 Quick Install
 
@@ -51,13 +51,15 @@ any device with a web browser.
 * 🛒 **Smart Shopping** - Generate organized shopping lists
 * 🔍 **Recipe Search** - Find recipes quickly
 * 📦 **Pantry Tracking** - Manage inventory and expiration dates
+* ☁️ **Sync** - after `cook login`, `cook server` keeps your recipe folder in step with your phone and desktop through [Cook Cloud sync](https://cook.md/) (Cook Basic)
 
 ## 🚀 Getting Started
 
-First, install CookCLI using one of the methods below. CookCLI comes with a few sample recipes to play with:
+First, install CookCLI using one of the methods below. CookCLI comes with a few sample recipes to play with. `cook seed` populates its target directory with recipe files and folders, so create a dedicated directory for them first:
 
 ```bash
-$ cook seed
+$ mkdir my-recipes && cd my-recipes
+$ cook seed ./
 $ cook recipe "Neapolitan Pizza.cook"
 ```
 
@@ -138,11 +140,11 @@ Serving Web UI on http://localhost:9080
 Serving recipe files from: "/Users/chefalexey/recipes"
 ```
 
-<img width="600" alt="recipes" src="docs/screenshots/recipe-list.png?v=2" />
-<img width="600" alt="recipe" src="docs/screenshots/recipe-detail.png?v=2" />
-<img width="600" alt="menu" src="docs/screenshots/menu.png?v=2" />
-<img width="600" alt="shopping list" src="docs/screenshots/shopping-list.png?v=2" />
-<img width="600" alt="pantry" src="docs/screenshots/pantry.png?v=2" />
+<img width="600" alt="recipes" src="docs/screenshots/recipe-list.png?v=3" />
+<img width="600" alt="recipe" src="docs/screenshots/recipe-detail.png?v=3" />
+<img width="600" alt="menu" src="docs/screenshots/menu.png?v=3" />
+<img width="600" alt="shopping list" src="docs/screenshots/shopping-list.png?v=3" />
+<img width="600" alt="pantry" src="docs/screenshots/pantry.png?v=3" />
 
 
 ## 📦 Installation
@@ -150,6 +152,22 @@ Serving recipe files from: "/Users/chefalexey/recipes"
 ### Download Binary
 
 Download the latest release for your platform from the [releases page](https://github.com/cooklang/CookCLI/releases) and add it to your PATH.
+
+Archives are named `cook-<version>-<os>-<arch>[-<libc>]`, with a `.sha256`
+next to each:
+
+| Platform | Archive |
+|---|---|
+| Linux x86_64 (static, any distribution) | `cook-<version>-linux-x86_64-musl.tar.gz` |
+| Linux x86_64 (glibc) | `cook-<version>-linux-x86_64-gnu.tar.gz` |
+| Linux x86 (32-bit) | `cook-<version>-linux-i686-musl.tar.gz` |
+| Linux ARM 64-bit (Raspberry Pi 3+ on a 64-bit OS) | `cook-<version>-linux-aarch64-musl.tar.gz` |
+| Linux ARM 32-bit hard-float (Raspberry Pi OS 32-bit) | `cook-<version>-linux-armhf-musl.tar.gz` |
+| macOS Apple Silicon / Intel | `cook-<version>-macos-aarch64.tar.gz` / `cook-<version>-macos-x86_64.tar.gz` |
+| Windows x86_64 / x86 / ARM64 | `cook-<version>-windows-x86_64.zip` / `-windows-i686.zip` / `-windows-aarch64.zip` |
+| FreeBSD x86_64 | `cook-<version>-freebsd-x86_64.tar.gz` |
+
+Once installed, `cook update` keeps it current.
 
 ### macOS/Linux
 
@@ -159,13 +177,63 @@ Using Homebrew:
 brew install cookcli
 ```
 
+### Fedora / RPM-based Linux
+
+Every [release](https://github.com/cooklang/CookCLI/releases) ships RPMs built
+in Fedora containers (x86_64 and aarch64). Download the one for your Fedora
+version and install it:
+
+```bash
+sudo dnf install ./cookcli-<version>-1.fcXX.x86_64.rpm
+```
+
+The package installs the `cook` binary and shell completions. To build the RPM
+yourself (or to set up a COPR repository), see [packaging/fedora](packaging/fedora).
+
+### Debian / Ubuntu
+
+Every [release](https://github.com/cooklang/CookCLI/releases) ships `.deb`
+packages for amd64 and arm64. They install on Debian 12+ and Ubuntu 22.04+:
+
+```bash
+sudo apt install ./cookcli_<version>-1_amd64.deb
+```
+
+The package installs the `cook` binary and shell completions. To build it
+yourself, see [packaging/debian](packaging/debian).
+
 ### Install with Cargo
 
 If you have Rust installed:
 
 ```bash
-cargo install cookcli
+cargo install cookcli --locked
 ```
+
+`--locked` builds against the dependency versions we tested and released with, rather than re-resolving to the newest compatible ones.
+
+Note that this compiles CookCLI and all its dependencies from source, which needs a few GB of RAM and disk. If you are on a Raspberry Pi, an Armbian board, or anything else memory-constrained, prefer the [prebuilt binaries](https://github.com/cooklang/CookCLI/releases) — we publish `aarch64` and `armhf` Linux builds.
+
+<details>
+<summary>Building on a low-memory single-board computer</summary>
+
+`cargo install` places its build directory under `$TMPDIR`. On Armbian, `/tmp` is mounted on zram — a RAM-backed device sized to half your RAM — so a multi-gigabyte build will exhaust memory and fail, sometimes with a confusing `failed to load bitcode of module ...` error.
+
+Point the build somewhere on real storage:
+
+```bash
+CARGO_TARGET_DIR=~/.cache/cookcli-build cargo install cookcli --locked
+```
+
+If memory is still tight, disable link-time optimisation for the build:
+
+```bash
+CARGO_PROFILE_RELEASE_LTO=false \
+CARGO_TARGET_DIR=~/.cache/cookcli-build \
+  cargo install cookcli --locked
+```
+
+</details>
 
 ### Build from Source
 
@@ -179,8 +247,9 @@ cd CookCLI
 # Install frontend dependencies
 npm install
 
-# Build CSS (required for web UI)
+# Build CSS and JS (required for web UI; the build fails without them)
 npm run build-css
+npm run build-js
 
 # Build the CLI with web UI
 cargo build --release
@@ -188,16 +257,46 @@ cargo build --release
 # Binary will be at target/release/cook
 ```
 
-#### Building without Self-Update
+#### Building without Node.js
 
-By default, CookCLI includes a self-update feature. To build without this feature (useful for CI/CD pipelines, package managers, or environments where auto-update is not desired):
+`static/css/output.css` and `static/js/editor.bundle.js` are generated by Tailwind and esbuild and are not checked into git, so they are missing from clones and from GitHub's auto-generated tag archives — and `cargo build` refuses to start without them.
+
+If Node.js is unavailable or its native toolchain has no build for your platform, use a source drop that ships those two files prebuilt:
 
 ```bash
-# Build without self-update feature
+# cook-<version>-source.tar.gz is attached to each GitHub release.
+# Set VERSION to the one you want: https://github.com/cooklang/CookCLI/releases
+VERSION=0.34.0
+
+curl -LO "https://github.com/cooklang/CookCLI/releases/download/v$VERSION/cook-$VERSION-source.tar.gz"
+tar xzf "cook-$VERSION-source.tar.gz"
+cd "cookcli-$VERSION"
+cargo build --release --locked
+```
+
+The crates.io package (`cargo install cookcli --locked`) includes them too.
+
+#### Cargo features
+
+The optional commands are behind Cargo features, all enabled by default. Turning them off cuts the dependency graph roughly in half (412 crates → 225) and the binary from ~23 MB to ~9 MB — useful for CI/CD, package managers, or small machines where you only want the core recipe tooling.
+
+| Feature | Command | Notes |
+|---|---|---|
+| `server` | `cook server` | Web UI (axum + tower). `cook build` still works without it. |
+| `import` | `cook import` | Scrape a recipe from a website. |
+| `lsp` | `cook lsp` | Language server for editor integrations. |
+| `sync` | `cook login` / `cook logout` | Recipe sync. Implies `server` — the sync loop runs inside it. |
+| `self-update` | `cook update` | In-place binary upgrade. |
+
+```bash
+# Core CLI only: recipe, shopping-list, search, doctor, pantry, report, build, seed
 cargo build --release --no-default-features
 
-# This disables the 'self-update' feature flag while keeping all other functionality
+# Core plus the web server
+cargo build --release --no-default-features --features server
 ```
+
+Everything not listed above — parsing, scaling, shopping lists, search, pantry, reports and the static site builder — is always compiled in.
 
 ### Development Setup
 
@@ -265,11 +364,106 @@ cook server
 # Allow access from other devices on your network
 cook server --host
 
+# Only if you open it by host name instead of IP address: name that origin,
+# or the server refuses to answer it
+cook server --host --cors-origin http://raspberrypi.local:9080
+
 # Use a different port
 cook server --port 8080
 
 # Open browser immideately
 cook server --open
+
+# Require sign-in before anyone can change recipes (asks for a password)
+cook server user add alice
+```
+
+Without users, anyone who can reach the server can change your recipes. Once
+you add one, visitors can still browse, but creating, editing or deleting
+recipes and changing the pantry or the shopping list need a signed-in user.
+Manage users with `cook server user add|passwd|remove|list`; a running server
+picks up the changes on its own. See [Signing in to make
+changes](docs/server.md#signing-in-to-make-changes).
+
+#### Sign-in in a container
+
+The container image runs `cook server /recipes --host`, so the server is open
+to everyone who can reach the container. To require sign-in:
+
+1. **Give the container a configuration directory.** The image's user has no
+   home directory, so without one there is nowhere to keep the users file or
+   the key that signs session cookies. In `docker-compose.yml`:
+
+   ```yaml
+   services:
+     cookcli:
+       image: ghcr.io/cooklang/cookcli:latest
+       environment:
+         COOK_CONFIG_DIR: /config
+       ports:
+         - "9080:9080"
+       volumes:
+         - ./recipes:/recipes
+         - ./config:/config
+   ```
+
+   Create the folder yourself before the first start (`mkdir config`): a
+   folder Docker creates belongs to root, and the container runs as UID 1000,
+   which cannot write to it. If your own UID is not 1000, set `user:` as the
+   comment in `docker-compose.yml` explains.
+
+2. **Add the first user.** Before starting the container:
+
+   ```bash
+   docker compose run --rm cookcli cook server user add alice
+   docker compose up -d
+   ```
+
+   If it is already running, add the user inside it and restart it once.
+   Sign-in turns on when the server starts with a users file, so only this
+   first user needs a restart:
+
+   ```bash
+   docker compose exec cookcli cook server user add alice
+   docker compose restart cookcli
+   ```
+
+3. **Manage users in the running container.** No restart needed: the server
+   reloads the users file when it changes. Removing a user or changing their
+   password signs them out everywhere.
+
+   ```bash
+   docker compose exec cookcli cook server user add bob
+   docker compose exec cookcli cook server user passwd bob
+   docker compose exec cookcli cook server user remove bob
+   docker compose exec cookcli cook server user list
+   ```
+
+The password prompt does not echo what you type. `docker compose exec` and
+`run` give the command a terminal; with plain `docker`, pass `-it`
+(`docker exec -it <container> cook server user add bob`). From a script, with
+no terminal, pipe the password in and pass `-T`:
+
+```bash
+printf '%s\n' "$PASSWORD" | docker compose exec -T cookcli cook server user add bob
+```
+
+### `cook build web`
+
+Generate a self-contained static website from your recipes. Hostable anywhere or browsable via `file://`.
+
+```bash
+# Build into ./_site from the current directory
+cook build web
+
+# Build a specific collection into a custom output
+cook build web dist --base-path ~/my-recipes
+
+# Build for hosting under a subpath
+cook build web --base-url /recipes/
+
+# Link back to the recipe repository from the footer
+cook build web --repo-url https://github.com/user/my-recipes
 ```
 
 ### `cook search`
@@ -290,7 +484,8 @@ cook search -b ~/recipes pasta
 ### `cook import`
 
 Import recipes from websites and convert them to Cooklang format. Requires
-`OPENAI_API_KEY` environment variable set.
+`OPENAI_API_KEY` environment variable set. Or
+[convert a recipe to Cooklang](https://cook.md/cookifies/new) on cook.md (Cook Basic).
 
 ```bash
 # Import a recipe
@@ -320,11 +515,11 @@ cook doctor
 
 ### `cook seed`
 
-Add sample recipes to explore Cooklang features.
+Add sample recipes to explore Cooklang features. This populates the target directory with recipe files and folders, so point it at an empty or dedicated directory.
 
 ```bash
 # Add to current directory
-cook seed
+cook seed ./
 
 # Add to specific directory
 cook seed ~/my-recipes
@@ -371,33 +566,83 @@ Detailed documentation for each command is available in the [docs/](docs/) direc
 * [Recipe command](docs/recipe.md) - viewing and converting recipes
 * [Shopping lists](docs/shopping-list.md) - creating shopping lists
 * [Server](docs/server.md) - web interface
+* [Build](docs/build.md) - generate a static website
 * [Search](docs/search.md) - finding recipes
 * [Import](docs/import.md) - importing from websites
 * [Doctor](docs/doctor.md) - validation and maintenance
 * [Seed](docs/seed.md) - example recipes
 * [Report](docs/report.md) - custom outputs
 * [Pantry](docs/pantry.md) - inventory management and tracking
+* [Completions](docs/completions.md) - shell completion scripts
 
 ## ⚙️ Configuration
 
 CookCLI looks for configuration files in:
 
 * `./config/` - in your recipe directory (highest priority)
-* `~/.config/cooklang/` - in your home directory (fallback)
-* `~/Library/Application Support/cook/` - on macOS (fallback)
+* the global configuration directory (fallback):
+  * `~/.config/cook/` - on Linux
+  * `~/Library/Application Support/cook/` - on macOS
+  * `%APPDATA%\cook\config\` - on Windows
 
 Configuration files:
 * `aisle.conf` - Organizes ingredients by store section
 * `pantry.conf` - Tracks your ingredient inventory with quantities
+
+### `COOK_CONFIG_DIR`
+
+Set `COOK_CONFIG_DIR` to use a different global configuration directory. It
+replaces the platform default above for *everything* CookCLI keeps there —
+`aisle.conf`, `pantry.conf`, your CookCloud session, the sync database, and
+`cook server`'s users file, session key and signed-out sessions — so it gives
+you a self-contained CookCLI:
+
+```bash
+COOK_CONFIG_DIR=~/kitchen/cook-config cook shopping-list dinner.cook
+```
+
+A local `./config/` still takes priority. An empty value means "unset", and the
+platform default applies.
+
+This is also how the test suite keeps itself away from your real session:
+`HOME` and `XDG_CONFIG_HOME` cannot do the job, because the Windows
+configuration directory is resolved through the Known Folder API and ignores
+both.
+
+### `COOK_CORS_ORIGIN`
+
+Set `COOK_CORS_ORIGIN` to name the origins `cook server` accepts browser
+requests from, and so the host names it answers at, separated by commas — the
+same values as `--cors-origin`, which overrides the variable:
+
+```bash
+COOK_CORS_ORIGIN=https://cook.example.com cook server --host
+```
+
+It exists for containers, where passing a flag means restating the image's
+whole command. An empty value means "unset". `--no-csrf-check` has no
+equivalent variable and has to be passed on the command line.
+
+### `COOK_USERS_FILE`
+
+Names the users file `cook server` reads to require sign-in, in place of
+`users.toml` in the configuration directory. `cook server user` edits the same
+file. `--users-file` overrides it, and an empty value means "unset". See
+[Signing in to make changes](docs/server.md#signing-in-to-make-changes).
+
+```bash
+COOK_USERS_FILE=/etc/cook/users.toml cook server --host
+```
 
 ### Aisle Configuration (`aisle.conf`)
 
 Organizes ingredients by store section for shopping lists. Items not in any category will appear under "Other".
 
 ```
+// In the order you walk the store
 [produce]
 tomatoes|tomato
-basil|basil leaves
+basil|basil leaves // fresh, not dried
 garlic
 onions
 
@@ -423,6 +668,12 @@ pork
 bread
 rolls
 ```
+
+Each `[name]` line starts a section, and each line under it is one ingredient,
+with its other names after `|`. Comments start with `//`, on a line of their
+own or at the end of one. Unlike `pantry.conf`, this file is not TOML: a line
+starting with `#` or `--` is read as an ingredient, and `cook doctor aisle`
+points such lines out.
 
 ### Pantry Configuration (`pantry.conf`)
 
@@ -544,6 +795,7 @@ Some source files include code from [cooklang-chef](https://github.com/Zheoni/co
 
 ## 🔗 Links
 
+* [CookCLI documentation](https://cooklang.org/cli/) - every command, the server, and guides
 * [Cooklang Specification](https://cooklang.org/docs/spec) - the recipe markup language
 * [Cooklang Apps](https://cooklang.org/app/) - iOS and Android apps
 

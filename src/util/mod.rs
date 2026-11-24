@@ -28,36 +28,35 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-pub mod cooklang_to_cooklang;
-pub mod cooklang_to_human;
-pub mod cooklang_to_latex;
-pub mod cooklang_to_md;
-pub mod cooklang_to_schema;
-pub mod cooklang_to_typst;
-pub mod format;
+pub mod menu;
+pub mod recipe_info;
+
+// The formatters and the parser now live in `cookcli-core`. Re-exported here
+// so the rest of the CLI keeps reaching them as `crate::util::format::..` and
+// `crate::util::PARSER`. Core is the single definition of `PARSER`; the copy
+// that used to live here was byte-for-byte the same parser configuration.
+pub use cookcli_core::format;
+pub use cookcli_core::parser::PARSER;
 
 use anyhow::{Context as _, Result};
 use camino::{Utf8Path, Utf8PathBuf};
-use clap::CommandFactory;
-use cooklang::{
-    ingredient_list::IngredientList, quantity::Value, Converter, CooklangParser, Extensions, Recipe,
-};
+use cooklang::Recipe;
 use cooklang_find::RecipeEntry;
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use tracing::warn;
-
-pub const RECIPE_SCALING_DELIMITER: char = ':';
-
-pub static PARSER: LazyLock<CooklangParser> = LazyLock::new(|| {
-    CooklangParser::new(Extensions::all(), Converter::default())
-});
 
 /// Parse a Recipe from a RecipeEntry with the given scaling factor
 pub fn parse_recipe_from_entry(entry: &RecipeEntry, scaling_factor: f64) -> Result<Arc<Recipe>> {
+    let mut recipe = parse_unscaled_recipe_from_entry(entry)?;
+    recipe.scale(scaling_factor, PARSER.converter());
+    Ok(Arc::new(recipe))
+}
+
+/// Parse a Recipe from a RecipeEntry without scaling it, for callers that
+/// work out the factor from the recipe itself (its `servings`) first.
+pub fn parse_unscaled_recipe_from_entry(entry: &RecipeEntry) -> Result<Recipe> {
     let content = entry.content().context("Failed to read recipe content")?;
-    let parsed = PARSER.parse(&content);
+    let (content, parsed) = cookcli_core::parser::parse_file(&content);
 
     // Log any warnings
     if parsed.report().has_warnings() {
@@ -77,7 +76,7 @@ pub fn parse_recipe_from_entry(entry: &RecipeEntry, scaling_factor: f64) -> Resu
         let mut error_output = Vec::new();
         parsed
             .report()
-            .write(&recipe_path, &content, false, &mut error_output)
+            .write(&recipe_path, content, false, &mut error_output)
             .ok();
         let error_details = String::from_utf8_lossy(&error_output);
         return Err(anyhow::anyhow!(
@@ -87,33 +86,102 @@ pub fn parse_recipe_from_entry(entry: &RecipeEntry, scaling_factor: f64) -> Resu
         ));
     }
 
-    let (mut recipe, _warnings) = parsed.into_result().expect("already checked for errors");
-
-    // Scale the recipe
-    recipe.scale(scaling_factor, PARSER.converter());
-    Ok(Arc::new(recipe))
+    let (recipe, _warnings) = parsed.into_result().expect("already checked for errors");
+    Ok(recipe)
 }
 
 pub fn write_to_output<F>(output: Option<&Utf8Path>, f: F) -> Result<()>
 where
     F: FnOnce(&mut dyn std::io::Write) -> Result<()>,
 {
-    let mut stream: Box<dyn std::io::Write> = if let Some(path) = output {
-        let file = std::fs::File::create(path).context("Failed to create output file")?;
-        let stream = anstream::StripStream::new(file);
-        Box::new(stream)
-    } else {
-        Box::new(anstream::stdout().lock())
-    };
-    f(stream.as_mut())?;
-    // Explicitly flush the stream to ensure all output is written
     use std::io::Write;
-    stream.flush()?;
+    if let Some(path) = output {
+        // Render fully before touching the file: a formatter that fails
+        // halfway (e.g. an unwritable cooklang quantity, #722) must not
+        // leave a truncated file behind.
+        let mut buf = Vec::new();
+        {
+            let mut stream = anstream::StripStream::new(&mut buf);
+            f(&mut stream)?;
+            stream.flush()?;
+        }
+        std::fs::write(path, &buf).context("Failed to write output file")?;
+    } else {
+        let mut stream = anstream::stdout().lock();
+        f(&mut stream)?;
+        stream.flush()?;
+    }
     Ok(())
 }
 
-pub fn split_recipe_name_and_scaling_factor(query: &str) -> Option<(&str, &str)> {
-    query.trim().rsplit_once(RECIPE_SCALING_DELIMITER)
+/// Present a `cookcli-core` error in the CLI's own wording.
+///
+/// Core renders errors as a single lowercase line, by library convention, and
+/// keeps its long-form parse report in a field. Capitalising for the terminal
+/// is this boundary's job, so every message the user sees reads the same way —
+/// and it happens in one place, because every command that reads recipes
+/// surfaces the same handful of errors.
+///
+/// Anything not named here converts as-is. That keeps `source` attached so
+/// anyhow prints the underlying cause, at the cost of a lowercase first line.
+pub fn cli_error(error: cookcli_core::CoreError) -> anyhow::Error {
+    use cookcli_core::CoreError;
+    match error {
+        CoreError::Parse { name, rendered, .. } => {
+            anyhow::anyhow!("Failed to parse recipe '{name}'\n{rendered}")
+        }
+        CoreError::RecipeNotFound { name } => anyhow::anyhow!("Recipe not found: {name}"),
+        // Named here only for the wording `cook pantry` has always used. The
+        // variant carries no source, so nothing is lost by converting it to a
+        // message.
+        CoreError::MissingConfig { kind } => anyhow::anyhow!("No {kind} configuration found"),
+        // `cook pantry add/remove/update` refusing a change. Core words these
+        // lowercase like every other `CoreError`, and already names the item
+        // and section, so the only thing left is the capital letter.
+        CoreError::PantryEdit { message } => anyhow::anyhow!("{}", sentence_case(&message)),
+        // Named here only for the capital letter: the variant carries no
+        // source, so nothing is lost by converting it to a message. `cook
+        // doctor validate` is what makes this reachable — a missing or
+        // mistyped `--base-path` fails before the walk starts.
+        CoreError::Search { base_dir, message } => {
+            anyhow::anyhow!("Cannot search '{base_dir}': {message}")
+        }
+        // Attach the wording to the underlying `io::Error` rather than to the
+        // `CoreError`, so the chain reads `Failed to read 'x' / Caused by:
+        // Permission denied` instead of repeating core's own line between the
+        // two.
+        //
+        // Deliberately does not say *what* was being read: `CoreError::Io`
+        // carries a path and no notion of the kind of file, and the commands
+        // that surface it read aisle and pantry configuration as well as
+        // recipes. Naming a `config/pantry.conf` a recipe would send the user
+        // looking in the wrong place.
+        CoreError::Io { path, source } => {
+            anyhow::Error::new(source).context(format!("Failed to read '{path}'"))
+        }
+        other => other.into(),
+    }
+}
+
+/// Capitalise the first character, leaving the rest alone.
+///
+/// `char`-wise rather than byte-wise, so a message opening with a non-ASCII
+/// letter is not cut in half.
+fn sentence_case(message: &str) -> String {
+    let mut chars = message.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Split `name:factor` into its parts.
+///
+/// The one definition lives in `cookcli-core`; this wrapper keeps the CLI's
+/// remaining call sites (`report`, `shopping_list`) reading the same way until
+/// they move over too.
+pub fn split_recipe_name_and_scaling_factor(query: &str) -> Option<(&str, f64)> {
+    cookcli_core::recipe::split_name_and_scale(query)
 }
 
 /// Resolves a path to an absolute path. If the input path is already absolute,
@@ -137,265 +205,208 @@ pub fn resolve_to_absolute_path(path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> 
     };
 
     // Normalize the path by resolving all components
-    std::fs::canonicalize(&absolute)
-        .map_err(|e| {
-            tracing::error!("Failed to canonicalize path: {:?}", e);
-            anyhow::anyhow!("Failed to canonicalize path")
-        })?
-        .try_into()
-        .map_err(|e| {
-            tracing::error!("Failed to convert canonicalized path to UTF-8: {:?}", e);
-            anyhow::anyhow!("Failed to convert canonicalized path to UTF-8")
-        })
+    let canonical = std::fs::canonicalize(&absolute)
+        .with_context(|| format!("Base path not found: {absolute}"))?;
+
+    // On Windows that is a `\\?\` path, and `glob`, which every
+    // `cooklang_find` walk uses, finds nothing under one other than
+    // `\\?\C:\…`: a collection on a mapped network drive or share
+    // (`\\?\UNC\…`) listed and searched as empty (#783). Drop the prefix
+    // where Windows allows it, and keep the path as given where it cannot
+    // be spelled without one (`\\?\Volume{…}\…`).
+    let resolved = dunce::simplified(&canonical);
+    let resolved = if has_verbatim_prefix(resolved) {
+        std::path::absolute(&absolute)?
+    } else {
+        resolved.to_path_buf()
+    };
+    resolved.try_into().map_err(|e| {
+        tracing::error!("Failed to convert canonicalized path to UTF-8: {:?}", e);
+        anyhow::anyhow!("Failed to convert canonicalized path to UTF-8")
+    })
 }
 
-pub fn extract_ingredients(
-    entry: &str,
-    list: &mut IngredientList,
-    seen: &mut BTreeMap<String, usize>,
-    base_path: &Utf8PathBuf,
-    converter: &Converter,
-    ignore_references: bool,
-    // `None` = include all references; `Some(&[..])` = include only these.
-    included_references: Option<&[String]>,
-) -> Result<()> {
-    if seen.contains_key(entry) {
-        return Err(anyhow::anyhow!(
-            "Circular dependency found: {} -> {}",
-            seen.keys().cloned().collect::<Vec<_>>().join(" -> "),
-            entry
-        ));
+/// Whether `path` starts with a `\\?\` prefix other than `\\?\C:\`.
+fn has_verbatim_prefix(path: &std::path::Path) -> bool {
+    use std::path::{Component, Prefix};
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => {
+            prefix.kind().is_verbatim() && !matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        }
+        _ => false,
     }
+}
 
-    seen.insert(entry.to_string(), seen.len());
+/// Whether a request-supplied path, joined to a directory, stays inside it.
+///
+/// Re-exported from `cookcli-core`, which is where the single definition lives
+/// now that `find::resolve_reference` has to apply the same rule to a recipe
+/// reference before looking it up.
+pub use cookcli_core::find::is_safe_relative_path;
 
-    // split into name and servings
-    let (name, scaling_factor) = split_recipe_name_and_scaling_factor(entry)
-        .map(|(name, scaling_factor)| {
-            let target = scaling_factor.parse::<f64>().unwrap_or_else(|err| {
-                let mut cmd = crate::args::CliArgs::command();
-                cmd.error(
-                    clap::error::ErrorKind::InvalidValue,
-                    format!("Invalid scaling target for '{name}': {err}"),
-                )
-                .exit()
-            });
-            (name, target)
-        })
-        .unwrap_or((entry, 1.0));
+/// Percent-encode each `/`-separated path segment, preserving the separators,
+/// so a recipe path can go into a URL or a `Location` header as it is.
+pub fn encode_url_path(relpath: &str) -> String {
+    relpath
+        .split('/')
+        .map(|seg| urlencoding::encode(seg).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
-    let recipe_entry =
-        get_recipe(base_path, name).with_context(|| format!("Failed to find recipe '{name}'"))?;
-    let recipe = parse_recipe_from_entry(&recipe_entry, scaling_factor)?;
-    let ref_indices = list.add_recipe(&recipe, converter, ignore_references);
+/// Resolve a recipe name or path to a file, in CLI wording.
+///
+/// The lookup itself lives in `cookcli-core`; this wrapper only translates the
+/// error, so the remaining CLI call sites read the same way as before.
+pub fn get_recipe(base_path: &Utf8Path, name: &str) -> Result<RecipeEntry> {
+    cookcli_core::find::get_recipe(base_path, name).map_err(cli_error)
+}
 
-    tracing::debug!(
-        "ignore_references = {}, ref_indices.len() = {}",
-        ignore_references,
-        ref_indices.len()
-    );
-    if !ignore_references {
-        for ref_index in ref_indices {
-            let ingredient = &recipe.ingredients[ref_index];
-            let reference = ingredient.reference.as_ref().unwrap();
-
-            // Build the display-style path (matches what the template shows)
-            let ref_display_path = if reference.components.is_empty() {
-                reference.name.clone()
-            } else {
-                format!("{}/{}", reference.components.join("/"), reference.name)
-            };
-
-            // If the caller specified which references to include, skip others.
-            // Normalize by stripping "./" prefix so paths from the shopping list
-            // file (without "./") match display paths (which may have "./").
-            if let Some(included) = included_references {
-                fn strip_dot_slash(s: &str) -> &str {
-                    s.strip_prefix("./").unwrap_or(s)
-                }
-                if !included
-                    .iter()
-                    .any(|r| strip_dot_slash(r) == strip_dot_slash(&ref_display_path))
-                {
-                    tracing::debug!(
-                        "Skipping reference '{}' — not in included_references",
-                        ref_display_path
-                    );
-                    continue;
-                }
+/// `path` canonicalized, or, when it does not exist yet, its nearest existing
+/// ancestor canonicalized with the rest appended.
+pub fn canonical_or_nearest(path: &Utf8Path) -> Utf8PathBuf {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(canonical) = current.canonicalize_utf8() {
+            return missing
+                .iter()
+                .rev()
+                .fold(canonical, |acc: Utf8PathBuf, part| acc.join(part));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                current = parent;
             }
-
-            let ref_path = reference.path(std::path::MAIN_SEPARATOR_STR);
-
-            let ref_entry = get_recipe(base_path, &ref_path).with_context(|| {
-                format!(
-                    "Failed to find referenced recipe '{}' from '{}'",
-                    ref_path,
-                    recipe_entry
-                        .path()
-                        .map(|p| p.to_string())
-                        .unwrap_or_else(|| name.to_string())
-                )
-            })?;
-
-            // Parse and scale the recipe based on the quantity specification
-            let ref_recipe = match ingredient.quantity.as_ref() {
-                Some(quantity) => {
-                    let target_value = match quantity.value() {
-                        Value::Number(num) => num
-                            .to_string()
-                            .parse::<f64>()
-                            .map_err(|_| anyhow::anyhow!("Invalid numeric value: {}", num))?,
-                        _ => {
-                            return Err(anyhow::anyhow!(
-                                "Invalid quantity value for referenced recipe: {}",
-                                ingredient.name
-                            ));
-                        }
-                    };
-
-                    let content = ref_entry
-                        .content()
-                        .context("Failed to read recipe content")?;
-                    let parsed = PARSER.parse(&content);
-
-                    // Check for parsing errors and format them with line context
-                    if parsed.report().has_errors() {
-                        let mut error_output = Vec::new();
-                        parsed
-                            .report()
-                            .write(&ref_path, &content, false, &mut error_output)
-                            .ok();
-                        let error_details = String::from_utf8_lossy(&error_output);
-                        return Err(anyhow::anyhow!(
-                            "Failed to parse referenced recipe '{}'\n{}",
-                            ref_path,
-                            error_details
-                        ));
-                    }
-
-                    let (mut recipe, _warnings) =
-                        parsed.into_result().expect("already checked for errors");
-
-                    // Use the new scale_to_target function
-                    tracing::debug!(
-                        "Scaling recipe '{}' to target {} {}",
-                        ref_path,
-                        target_value,
-                        quantity.unit().unwrap_or("(no unit)")
-                    );
-                    recipe
-                        .scale_to_target(target_value, quantity.unit(), PARSER.converter())
-                        .context(format!(
-                            "Failed to scale recipe '{}' with target {} {}",
-                            ref_path,
-                            target_value,
-                            quantity.unit().unwrap_or("(no unit)")
-                        ))?;
-
-                    // Don't apply additional CLI scaling when using scale_to_target
-                    // The target value already accounts for the scaling
-
-                    Arc::new(recipe)
-                }
-                None => {
-                    // No quantity specified, use CLI scaling only
-                    parse_recipe_from_entry(&ref_entry, scaling_factor)?
-                }
-            };
-
-            // Find ingredients with references that need to be processed
-            let mut nested_refs = Vec::new();
-            for (index, ingredient) in ref_recipe.ingredients.iter().enumerate() {
-                if ingredient.reference.is_some() {
-                    nested_refs.push(index);
-                }
-            }
-
-            // Process nested references recursively
-            tracing::debug!("Found {} nested references to process", nested_refs.len());
-            for nested_index in nested_refs {
-                let nested_ingredient = &ref_recipe.ingredients[nested_index];
-                tracing::debug!("Processing nested ingredient: {:?}", nested_ingredient.name);
-                if let Some(nested_ref) = &nested_ingredient.reference {
-                    // Build the full path for the nested reference
-                    let nested_path = if nested_ref.components.is_empty() {
-                        nested_ref.name.clone()
-                    } else {
-                        let sep = std::path::MAIN_SEPARATOR.to_string();
-                        format!(
-                            ".{}{}{}{}",
-                            sep,
-                            nested_ref.components.join(&sep),
-                            sep,
-                            nested_ref.name
-                        )
-                    };
-
-                    // Get the nested recipe to check its servings metadata
-                    let nested_entry_path = get_recipe(base_path, &nested_path)?;
-                    let nested_content = nested_entry_path
-                        .content()
-                        .context("Failed to read nested recipe")?;
-                    let (nested_recipe, _) = PARSER
-                        .parse(&nested_content)
-                        .into_result()
-                        .context("Failed to parse nested recipe")?;
-
-                    // For nested references, we need to handle scaling properly based on units
-                    if let Some(quantity) = &nested_ingredient.quantity {
-                        if quantity.unit() == Some("servings") {
-                            // This is a servings-based reference
-                            // The quantity value is the target number of servings we need
-                            if let Value::Number(target_servings) = quantity.value() {
-                                // We need to scale the nested recipe to produce target_servings
-                                let mut scaled_nested = nested_recipe;
-                                let target = target_servings.to_string().parse().unwrap_or(1.0);
-                                tracing::debug!("Scaling nested recipe to {} servings", target);
-                                scaled_nested
-                                    .scale_to_target(target, Some("servings"), PARSER.converter())
-                                    .context("Failed to scale nested recipe")?;
-
-                                // Now add this properly scaled nested recipe's ingredients
-                                // Pass false to exclude references - they will be handled recursively
-                                list.add_recipe(&Arc::new(scaled_nested), converter, false);
-                            }
-                        } else {
-                            // For non-servings units, treat the quantity as a regular scaling factor
-                            // This handles cases like "2 cups" of something
-                            if let Value::Number(num) = quantity.value() {
-                                let scaling = num.to_string().parse().unwrap_or(1.0);
-                                let mut scaled_nested = nested_recipe;
-                                scaled_nested.scale(scaling, PARSER.converter());
-                                list.add_recipe(&Arc::new(scaled_nested), converter, false);
-                            }
-                        }
-                    } else {
-                        // No quantity specified, use scale 1.0
-                        list.add_recipe(&Arc::new(nested_recipe), converter, false);
-                    }
-                }
-            }
-
-            // Now add the non-reference ingredients from the recipe
-            // We need to do this AFTER processing nested references to avoid duplicates
-            // Pass false to exclude references since we've already expanded them
-            list.add_recipe(&ref_recipe, converter, false);
+            _ => return path.to_path_buf(),
         }
     }
-
-    seen.remove(entry);
-
-    Ok(())
 }
 
-pub fn get_recipe(base_path: &Utf8PathBuf, name: &str) -> Result<RecipeEntry> {
-    // Remove ./ prefix if present before passing to cooklang_find
-    // The cooklang-find library doesn't expect the ./ prefix
-    let clean_name = name.strip_prefix("./").unwrap_or(name);
+/// Whether `path` stays inside `base` once links are followed. `path` need
+/// not exist: its nearest existing ancestor is canonicalized and the rest
+/// appended, so `Link/New.cook` through a `Link -> /outside` symlink counts
+/// as outside, as does a `Linked.cook -> /outside` file.
+///
+/// `is_safe_relative_path` is lexical, so a request for `Link/Secret.cook`
+/// passes it; without this the raw, save and delete endpoints, the editor and
+/// the picture and `/api/static` routes then reached the file the link
+/// pointed to (#698). A link that stays in the directory still resolves.
+pub fn inside_collection(base: &Utf8Path, path: &Utf8Path) -> bool {
+    let base = canonical_or_nearest(base);
+    canonical_or_nearest(path).starts_with(&base)
+}
 
-    Ok(cooklang_find::get_recipe(
-        vec![base_path.clone()],
-        clean_name.into(),
-    )?)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encodes_spaces_per_segment_preserving_slashes() {
+        assert_eq!(
+            encode_url_path("recipe/Root Vegetables/Mash Up.html"),
+            "recipe/Root%20Vegetables/Mash%20Up.html"
+        );
+    }
+
+    /// Core hands over a lowercase line; this is the only thing the terminal
+    /// needs done to it, and it must not corrupt a message that opens with a
+    /// multi-byte character or have anything to trip over in an empty one.
+    #[test]
+    fn sentence_case_capitalises_only_the_first_character() {
+        assert_eq!(
+            sentence_case("item 'flour' not found in section 'pantry'"),
+            "Item 'flour' not found in section 'pantry'"
+        );
+        assert_eq!(sentence_case("äpple is gone"), "Äpple is gone");
+        assert_eq!(sentence_case("'quoted' first"), "'quoted' first");
+        assert_eq!(sentence_case(""), "");
+    }
+
+    #[test]
+    fn splits_recipe_with_numeric_scaling_factor() {
+        assert_eq!(
+            split_recipe_name_and_scaling_factor("recipe.cook:2"),
+            Some(("recipe.cook", 2.0))
+        );
+    }
+
+    #[test]
+    fn splits_recipe_with_decimal_scaling_factor() {
+        assert_eq!(
+            split_recipe_name_and_scaling_factor("recipe.cook:1.5"),
+            Some(("recipe.cook", 1.5))
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_colon() {
+        assert_eq!(split_recipe_name_and_scaling_factor("recipe.cook"), None);
+    }
+
+    #[test]
+    fn returns_none_for_windows_absolute_path() {
+        // Regression for https://github.com/cooklang/cookcli/issues/335
+        assert_eq!(
+            split_recipe_name_and_scaling_factor(r"C:\test\recipe.cook"),
+            None
+        );
+    }
+
+    #[test]
+    fn returns_none_when_right_side_is_not_numeric() {
+        assert_eq!(
+            split_recipe_name_and_scaling_factor("recipe.cook:abc"),
+            None
+        );
+    }
+
+    /// A collection with a recipe one folder down, as in #783.
+    #[cfg(windows)]
+    fn collection() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("French")).unwrap();
+        std::fs::write(dir.path().join("French").join("Crepes.cook"), "@eggs{2}\n").unwrap();
+        dir
+    }
+
+    #[cfg(windows)]
+    fn lists_crepes(base: &Utf8Path) -> bool {
+        let tree = cooklang_find::build_tree(base).unwrap();
+        tree.children
+            .get("French")
+            .is_some_and(|folder| folder.children.contains_key("Crepes"))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolved_base_path_has_no_verbatim_prefix() {
+        let dir = collection();
+        let base = Utf8Path::from_path(dir.path()).unwrap();
+        let resolved = resolve_to_absolute_path(base).unwrap();
+        assert!(!resolved.as_str().starts_with(r"\\?\"), "{resolved}");
+        assert!(lists_crepes(&resolved), "nothing listed under {resolved}");
+    }
+
+    /// A mapped network drive or share canonicalizes to `\\?\UNC\…`, under
+    /// which `glob` (and so every `cooklang_find` walk) finds nothing: the
+    /// home page and search came up empty while a recipe's URL still opened
+    /// it (#783). The admin share reaches a local folder the same way.
+    #[cfg(windows)]
+    #[test]
+    fn lists_recipes_in_a_collection_on_a_network_share() {
+        let dir = collection();
+        let local = dir.path().to_str().unwrap();
+        let Some((drive, rest)) = local.split_once(":\\") else {
+            panic!("temp dir {local} has no drive letter");
+        };
+        let share = format!(r"\\localhost\{drive}$\{rest}");
+        if !std::path::Path::new(&share).is_dir() {
+            eprintln!("skipped: the admin share {share} is not reachable");
+            return;
+        }
+        let resolved = resolve_to_absolute_path(Utf8Path::new(&share)).unwrap();
+        assert!(lists_crepes(&resolved), "nothing listed under {resolved}");
+    }
 }

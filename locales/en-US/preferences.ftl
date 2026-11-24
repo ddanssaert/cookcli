@@ -11,6 +11,7 @@ pref-aisle-path = Aisle Configuration
 pref-pantry-path = Pantry Configuration
 pref-base-path = Recipe Directory
 pref-not-configured = Not configured
+pref-global-config = Global configuration
 
 # Version
 pref-version = Version
@@ -21,3 +22,7 @@ pref-upload-aisle = Upload Aisle Configuration
 pref-upload-pantry = Upload Pantry Configuration
 pref-upload-success = Configuration uploaded successfully
 pref-upload-error = Error uploading configuration
+
+# Features
+pref-features = Features
+pref-features-desc = Choose which features appear in the navigation bar.

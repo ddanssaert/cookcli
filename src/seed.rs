@@ -1,6 +1,6 @@
 use std::fs;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context as _, Result};
 use camino::Utf8PathBuf;
 use clap::Args;
 
@@ -29,23 +29,24 @@ pub struct SeedArgs {
 }
 
 pub fn run(ctx: &Context, args: SeedArgs) -> Result<()> {
-    let path = args.output.as_ref().unwrap_or(&ctx.base_path);
+    let path = args.output.as_deref().unwrap_or(ctx.base_path());
 
     if path.is_file() {
         bail!("{} is not a directory", path);
     }
 
-    fs::create_dir_all(path).expect("Couldn't create output path");
+    fs::create_dir_all(path).with_context(|| format!("Couldn't create output path: {path}"))?;
 
     for seed in SeedFiles::iter() {
-        SeedFiles::get(seed.as_ref()).map(|content| {
-            let file = path.join(seed.as_ref());
-            let parent = file.parent().expect("Invalid path");
+        let content = SeedFiles::get(seed.as_ref())
+            .with_context(|| format!("Embedded seed file not found: {seed}"))?;
+        let file = path.join(seed.as_ref());
+        let parent = file.parent().expect("Invalid path");
 
-            fs::create_dir_all(parent).expect("Failed to create directory");
-
-            fs::write(file, content.data.as_ref())
-        });
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {parent}"))?;
+        fs::write(&file, content.data.as_ref())
+            .with_context(|| format!("Failed to write seed file: {file}"))?;
     }
 
     Ok(())

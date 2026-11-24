@@ -18,7 +18,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '26'   # as upstream's Dockerfile (node:26.13.0)
 
       - name: Install npm dependencies
         run: npm install
