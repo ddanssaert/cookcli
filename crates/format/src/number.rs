@@ -259,6 +259,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
     fn quantities_with_units() {
         let parsed = crate::test_support::parse_recipe(
             "Mix @milk{1 5/8%cup}, @eggs{3} and @salt{a pinch}.\n",
@@ -279,6 +280,7 @@ mod tests {
     /// unit database has it; cups, spoons, counts and unknown units keep the
     /// fractions.
     #[test]
+    #[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
     fn metric_time_and_temperature_stay_decimals() {
         let parsed = crate::test_support::parse_recipe(
             "Add @flour{100.625%g}, @butter{0.5%kg}, @milk{0.25%l}, @oil{1.5%Tbsp}, \

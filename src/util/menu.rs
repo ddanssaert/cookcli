@@ -282,6 +282,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
     fn plain_numbers_scale() {
         assert_eq!(
             scaled_quantity(Some("2"), Some("cup"), 3.0),

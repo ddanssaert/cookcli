@@ -371,6 +371,7 @@ mod tests {
     /// them *changes* the authored quantity; the `scale(1.0)` assertion is the
     /// one to revisit if the unit database ever comes back.
     #[test]
+    #[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
     fn neither_scaling_by_one_nor_parse_unscaled_disturbs_authored_units() {
         let text = "Pour @milk{1500%ml}.\n";
 

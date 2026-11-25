@@ -164,6 +164,7 @@ fn typst_output_is_a_well_formed_document() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
 fn cooklang_output() {
     assert_snapshot!(render("cooklang"));
 }

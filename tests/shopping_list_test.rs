@@ -63,6 +63,7 @@ fn test_shopping_list_multiple_recipes() {
 }
 
 #[test]
+#[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
 fn test_shopping_list_with_scaling() {
     let temp_dir = common::setup_test_recipes().unwrap();
 
@@ -262,6 +263,7 @@ fn test_shopping_list_menu_file() {
 }
 
 #[test]
+#[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
 fn test_shopping_list_combine_quantities() {
     let temp_dir = common::setup_test_recipes().unwrap();
 

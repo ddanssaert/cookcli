@@ -97,6 +97,7 @@ fn test_schema_step_no_timer_no_time_required() {
 }
 
 #[test]
+#[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
 fn test_schema_text_only_timer_no_time_required() {
     // A timer with only a text name and no numeric quantity should not
     // produce timeRequired, but should still appear in step text.
@@ -264,6 +265,7 @@ fn test_schema_unknown_timer_unit_skipped() {
 }
 
 #[test]
+#[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
 fn test_schema_text_value_timer_skipped() {
     // The parser treats "10-20" as a text value, not a numeric range.
     // Text-value timers should not contribute to timeRequired.

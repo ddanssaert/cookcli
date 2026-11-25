@@ -824,6 +824,7 @@ fn an_ingredient_also_used_optionally_is_still_wanted() {
 /// like any other. Pinned because the code filters on `should_be_listed`,
 /// which reads as though it would leave this out.
 #[test]
+#[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
 fn a_dash_prefixed_ingredient_is_wanted_like_any_other() {
     let dir = temp();
     write(

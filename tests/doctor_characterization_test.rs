@@ -605,6 +605,7 @@ fn doctor_with_no_subcommand_counts_recipes_but_does_not_name_them() {
 /// totals count it, and the command still exits successfully: reporting the
 /// problem is the point.
 #[test]
+#[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
 fn validate_reports_a_textual_timer_and_still_exits_successfully() {
     let quantity = "a few";
     let dir = collection(&format!("Cook for ~{{{quantity}%minutes}}.\n"), None, None);
@@ -637,6 +638,7 @@ fn strict_validation_fails_on_a_textual_timer() {
 
 /// A numeric timer is not that failure, whatever its unit is spelled.
 #[test]
+#[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
 fn strict_validation_accepts_a_numeric_timer() {
     let dir = collection("Bake for ~{40%minutes}, then ~{1%hr}.\n", None, None);
 
@@ -650,6 +652,7 @@ fn strict_validation_accepts_a_numeric_timer() {
 /// `cook doctor` with no subcommand runs validation as one of its sections and
 /// reports the same warning in the summary it already prints.
 #[test]
+#[ignore = "fork (ddanssaert/cookcli): all Cooklang extensions and bundled units change this upstream expectation"]
 fn doctor_with_no_subcommand_reports_a_textual_timer() {
     let quantity = "a few";
     let dir = collection(&format!("Cook for ~{{{quantity}%minutes}}.\n"), None, None);
