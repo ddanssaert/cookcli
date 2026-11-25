@@ -685,7 +685,9 @@ mod tests {
     #[test]
     fn temperatures_keep_their_degree_sign() {
         // fork: cooklang 0.19 drops the ° of an inline temperature (see restore_degree_signs)
-        let recipe = parse_recipe("Bake at 180°C, or 356 °F.\n", "t", 1.0).unwrap().value;
+        let recipe = parse_recipe("Bake at 180°C, or 356 °F.\n", "t", 1.0)
+            .unwrap()
+            .value;
         let units: Vec<_> = recipe
             .inline_quantities
             .iter()
