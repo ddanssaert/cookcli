@@ -90,7 +90,7 @@ pub(crate) fn write_atomically(
                 return overwrite(&target, contents.as_ref());
             }
             drop(file);
-            std::fs::set_permissions(&temp, metadata.permissions())?;
+            mode_best_effort(std::fs::set_permissions(&temp, metadata.permissions()))?;
         } else {
             drop(file);
         }
@@ -104,6 +104,17 @@ pub(crate) fn write_atomically(
         return Err(failed(source));
     }
     Ok(())
+}
+
+/// Fork (ddanssaert/cookcli): copying a file's mode is best effort. On a dataset whose ACL rules
+/// refuse `chmod` (ZFS `aclmode=restricted` with NFSv4 ACLs, as on TrueNAS) it fails with EPERM for
+/// every file, while the inherited ACL already gives the new file the right access. Any other
+/// error still fails the write.
+fn mode_best_effort(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        other => other,
+    }
 }
 
 /// Whether renaming the freshly written `temp` over `target` leaves `target`
@@ -188,6 +199,15 @@ pub(crate) fn rename_replace(from: &Utf8Path, to: &Utf8Path) -> std::io::Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_refused_chmod_does_not_fail_the_write() {
+        // fork: ZFS aclmode=restricted answers every chmod with EPERM
+        let eperm = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(super::mode_best_effort(Err(eperm)).is_ok());
+        let full = std::io::Error::other("disk full");
+        assert!(super::mode_best_effort(Err(full)).is_err());
+    }
+
     use super::*;
 
     fn base(dir: &tempfile::TempDir) -> camino::Utf8PathBuf {

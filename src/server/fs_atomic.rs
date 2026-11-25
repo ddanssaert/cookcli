@@ -73,6 +73,17 @@ pub fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     })
 }
 
+/// Fork (ddanssaert/cookcli): copying a file's mode is best effort. On a dataset whose ACL rules
+/// refuse `chmod` (ZFS `aclmode=restricted` with NFSv4 ACLs, as on TrueNAS) it fails with EPERM for
+/// every file, while the inherited ACL already gives the new file the right access. Any other
+/// error still fails the write.
+fn mode_best_effort(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Ok(()),
+        other => other,
+    }
+}
+
 /// Copies `from` to a new file at `to`, keeping its permissions and
 /// modification time, and refusing an existing `to`.
 fn copy_no_replace(from: &Path, to: &Path) -> io::Result<()> {
@@ -85,7 +96,7 @@ fn copy_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 
     let copied = (|| {
         io::copy(&mut source, &mut target)?;
-        target.set_permissions(metadata.permissions())?;
+        mode_best_effort(target.set_permissions(metadata.permissions()))?;
         if let Ok(modified) = metadata.modified() {
             target.set_modified(modified)?;
         }
@@ -148,7 +159,7 @@ pub fn write_replace(path: &Path, contents: &[u8]) -> io::Result<()> {
             .create_new(true)
             .open(&temporary)?;
         if let Some(metadata) = &existing {
-            file.set_permissions(metadata.permissions())?;
+            mode_best_effort(file.set_permissions(metadata.permissions()))?;
         }
         file.write_all(contents)?;
         file.sync_all()?;

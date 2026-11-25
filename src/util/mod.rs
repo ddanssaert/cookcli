@@ -86,7 +86,8 @@ pub fn parse_unscaled_recipe_from_entry(entry: &RecipeEntry) -> Result<Recipe> {
         ));
     }
 
-    let (recipe, _warnings) = parsed.into_result().expect("already checked for errors");
+    let (mut recipe, _warnings) = parsed.into_result().expect("already checked for errors");
+    cookcli_core::parser::restore_degree_signs(&mut recipe); // fork: 180°C, not 180 C
     Ok(recipe)
 }
 

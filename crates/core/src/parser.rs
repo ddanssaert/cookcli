@@ -89,6 +89,22 @@ pub fn parse_recipe_at(
     Ok(outcome)
 }
 
+/// Fork (ddanssaert/cookcli): put the degree sign back on temperatures found in step text.
+///
+/// With the temperature extension on, cooklang 0.19's `find_inline_quantity` trims every
+/// non-alphabetic character from the unit, so `180°C` comes out as `180 C`. Only `C` and `F`
+/// are rewritten: the unit table knows no other unit by those letters.
+pub fn restore_degree_signs(recipe: &mut Recipe) {
+    for quantity in &mut recipe.inline_quantities {
+        let fixed = match quantity.unit() {
+            Some("C") => "°C",
+            Some("F") => "°F",
+            _ => continue,
+        };
+        *quantity = cooklang::Quantity::new(quantity.value().clone(), Some(fixed.to_string()));
+    }
+}
+
 /// Strip a leading UTF-8 byte-order mark.
 ///
 /// `cooklang`'s frontmatter fence check runs on the raw text, so in a BOM'd
@@ -176,7 +192,10 @@ pub(crate) fn parse_unscaled(
     shift_spans(&mut diagnostics, shift);
 
     match parsed.into_result() {
-        Ok((recipe, _)) => Ok(Outcome::with_diagnostics(recipe, diagnostics)),
+        Ok((mut recipe, _)) => {
+            restore_degree_signs(&mut recipe);
+            Ok(Outcome::with_diagnostics(recipe, diagnostics))
+        }
         // `into_result` fails when `is_valid()` is false, which is
         // `has_output() && !has_errors()`. We have just ruled out errors, but
         // cooklang does not promise output is present, so this arm is
@@ -660,6 +679,18 @@ mod tests {
                 span: Some(span)
             })
         );
+    }
+
+    #[test]
+    fn temperatures_keep_their_degree_sign() {
+        // fork: cooklang 0.19 drops the ° of an inline temperature (see restore_degree_signs)
+        let recipe = parse_recipe("Bake at 180°C, or 356 °F.\n", "t", 1.0).unwrap().value;
+        let units: Vec<_> = recipe
+            .inline_quantities
+            .iter()
+            .map(|q| q.unit().unwrap_or(""))
+            .collect();
+        assert_eq!(units, ["°C", "°F"]);
     }
 
     #[test]
